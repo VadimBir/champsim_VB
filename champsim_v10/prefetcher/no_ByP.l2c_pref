@@ -1,0 +1,50 @@
+#include "cache.h"
+
+// #define PF_DEBUG_L1D_QUEUE
+
+void CACHE::l2c_prefetcher_initialize() {
+    cout << "CPU " << cpu << " L2C next line prefetcher" << endl;
+}
+int L1D_MSHR_release_limit = 4;
+bool is_L1D_MSHR_releasing = false;
+uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type,
+                                       uint32_t metadata_in) {
+    CACHE *l1d = (CACHE *) this->upper_level_dcache[cpu];
+
+    if (l1d->MSHR.occupancy+1 >= L1D_MSHR_SIZE) {
+        BYPASS_L1D_Cache = true;
+        is_L1D_MSHR_releasing = true;
+    } else {
+        if (!is_L1D_MSHR_releasing)
+            BYPASS_L1D_Cache = false;
+    }
+    if (l1d->MSHR.occupancy <= L1D_MSHR_release_limit)
+        is_L1D_MSHR_releasing = false;
+
+//BYPASS_L1D_Cache = true;
+//BYPASS_L1D_on_MSHR_cap = false;
+    uint64_t pf_addr = ((addr >> LOG2_BLOCK_SIZE) + 1) << LOG2_BLOCK_SIZE;
+
+//    DP(if (warmup_complete[cpu]) {
+  //      cout << "[" << NAME << "] " << __func__ << hex << " base_cl: " << (addr>>LOG2_BLOCK_SIZE);
+    //    cout << " pf_cl: " << (pf_addr>>LOG2_BLOCK_SIZE) << " ip: " << ip << " cache_hit: " << +cache_hit << " type: "
+      //  << +type << endl; });
+#ifdef PF_DEBUG_L1D_QUEUE
+    if (l1d->MSHR.occupancy + 1 >= L1D_MSHR_SIZE)
+        cout << "L1D MSHR NEAR FULL";
+    else
+        cout << "L1D MSHR occupancy: " << l1d->MSHR.occupancy;
+#endif
+    // prefetch_line(ip, addr, pf_addr, FILL_L2, 0);
+
+    return metadata_in;
+}
+
+uint32_t CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch,
+                                          uint64_t evicted_addr, uint32_t metadata_in) {
+    return metadata_in;
+}
+
+void CACHE::l2c_prefetcher_final_stats() {
+    cout << "CPU " << cpu << " L2C next line prefetcher final stats" << endl;
+}
