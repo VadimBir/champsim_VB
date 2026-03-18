@@ -1,4 +1,4 @@
-# ChampSim v10 — Bypass DSE Research Framework
+# ChampSim v10 — Accelerated and Speed up architecture including a Bypass modeling Framework
 
 ChampSim out-of-order CPU simulator with L1D cache bypass design space exploration (DSE).
 
