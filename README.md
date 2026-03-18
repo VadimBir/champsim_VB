@@ -1,7 +1,6 @@
 # ChampSim v10 — Bypass DSE Research Framework
 
 ChampSim out-of-order CPU simulator with L1D cache bypass design space exploration (DSE).
-Active sim stack: `champsim_v10` (was `champsim_v7_ByP_fast`).
 
 ---
 
