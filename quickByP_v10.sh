@@ -17,14 +17,28 @@ doMinSim="${doMinSim:-0}"
 # USER SETTINGS
 # =========================================================
 
-OUT_ROOT="./output13"
-
+OUT_ROOT="./outputs/out"
+i=1
+while true; do
+    dir=$(printf "%s%02d" "$OUT_ROOT" "$i") 
+    if [[ ! -d "$dir" ]]; then
+        mkdir -p "$dir"
+        echo "Using directory: $dir"
+        OUT_ROOT=$dir
+        break
+    fi
+    ((i++))
+    if (( i > 99 )); then
+        echo "ERROR: reached limit (99)"
+        exit 1
+    fi
+done
 # =========================================================
 # RUNTIME-EDITABLE DURING EXECUTION
 # Edit THIS SAME SCRIPT while it runs, save it, and new value
 # will be used by wait_for_slot().
 # =========================================================
-MAX_CONCURRENT_PROCS=6
+MAX_CONCURRENT_PROCS=7
 
 # Poll interval for slot checking / stale temp cleanup
 POLL_SEC=7
@@ -34,7 +48,7 @@ LAUNCH_DELAY_SEC=1
 
 # Isolated build temp root
 WORK_BASE="/tmp/champsim_builds"
-DB_FNAME="${OUT_ROOT:-./champsim_results}/champsim_results.db"
+DB_FNAME="${OUT_ROOT:-./champsim_results}/champsim_resultsByP.db"
 
 # If temp build dir is older than this and not active anymore, delete it during run
 BUILD_STALE_SEC=0
@@ -71,7 +85,7 @@ FAST_WARMUP=500000
 FAST_SIM=3000000
 
 # CORE_LIST=(16 1 2  8 4)
-CORE_LIST=(16 8 1 2 4)
+CORE_LIST=(2)
 
 TRACE_LIST=(
   "LLM256.Pythia-70M_21M"
@@ -82,27 +96,30 @@ TRACE_LIST=(
 # or
 #   "L1 L2 L3"
 PREFETCH_LIST=(
-  "next_line-1-2-4 next_line"
-  "next_line ip_stride"
-  "next_line no"
-  "no next_line"
+#   "next_line-1-2-4 next_line"
   "no no"
+#   "next_line ip_stride"
+#   "next_line no"
+#   "no next_line"
 )
 
 LLC_PREFETCHER_DEFAULT="no"
 
 MODEL_LIST=(
-"ByP_cleanApcLpmScore.bypass"
-"ByP_fixCapacityDemandProjection.bypass"
-"ByP_freeCreditApcRatio.bypass"
-"ByP_l1ReliefVsL2Cost.bypass"
-"ByP_queueAwareApcLpmScore.bypass"
-"ByP_queueWeightedProjection.bypass"
-"ByP_ratioApcLpmScore.bypass"
-"ByP_softBudgetWindow.bypass"
-"ByP_threeLevelCascadeScore.bypass"
-"ByP_w_capacityDemandProjection.bypass"
-"ByP_x2OpinionPowerLaw.bypass"
+# "ByP_capacityDemandProjection_2.bypass"
+# "ByP_w_capacityDemandProjection_2.bypass"
+
+# "ByP_cleanApcLpmScore.bypass"
+# "ByP_fixCapacityDemandProjection.bypass"
+# "ByP_freeCreditApcRatio.bypass"
+# "ByP_l1ReliefVsL2Cost.bypass"
+# "ByP_queueAwareApcLpmScore.bypass"
+# "ByP_queueWeightedProjection.bypass"
+# "ByP_ratioApcLpmScore.bypass"
+# "ByP_softBudgetWindow.bypass"
+# "ByP_threeLevelCascadeScore.bypass"
+# "ByP_w_capacityDemandProjection.bypass"
+# "ByP_x2OpinionPowerLaw.bypass"
     
 # "ByP_capacityDemandProjection.bypass"
 # "ByP_apcLpmOnly.bypass"
@@ -111,7 +128,7 @@ MODEL_LIST=(
 # "ByP_rqOccupancyLpmGated.bypass"
 # "ByP_trigger30.bypass"
 # "ByP_windowBudgetModel.bypass"
-# "no.bypass"
+"no.bypass"
 
 # "B001_trigger_30pct.bypass"
 # "B002_trigger_40pct.bypass"
@@ -185,7 +202,7 @@ PGO_FILE="profiles_v4/PGO_4_SPEC_LLM.profdata"
 ARCH_BASE="glc"
 
 TRACES_DIR="./traces"
-TRACE_PERCENT=25
+TRACE_PERCENT=20
 
 # =========================================================
 # PATHS
@@ -625,7 +642,7 @@ resolve_model_file() {
     fi
 
     found="$(find "$CHAMPSIM_DIR/src/ByP_Models" -type f -name "$normalized" -print -quit 2>/dev/null || true)"
-
+    # echo 
     [[ -n "$found" ]] || return 1
     echo "$found"
 }
@@ -647,6 +664,7 @@ build_binary_for_cfg() {
         echo "[ERROR] missing bypass model via find: $model_file" >> "$logfile"
         return 207
     }
+  echo "[MODEL PATH] $model_file" >> "$logfile"
   local arch_src="$CHAMPSIM_DIR/inc/Arch/${core_uarch}.h"
   local branch_src="$CHAMPSIM_DIR/branch/${BRANCH}.bpred"
   local l1_src="$CHAMPSIM_DIR/prefetcher/${l1_pf}.l1d_pref"

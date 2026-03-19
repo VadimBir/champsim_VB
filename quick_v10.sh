@@ -1,6 +1,12 @@
 #!/bin/bash
 
-eval $(grep -v '^#' config_fast.ini | xargs -d '\n')
+arch="${arch:-glc}"
+NUM_CORES="${NUM_CORES:-2}"
+TRACE_PERCENT="${TRACE_PERCENT:-20}"
+tracesDirName="${tracesDirName:-traces}"
+isDebug="${isDebug:--1}"
+doMinSim="${doMinSim:-0}"
+isProfile="${isProfile:-0}"
 # trace="Pythi"
 # trace="OPT"
 arch="${arch:-glc}"
@@ -35,13 +41,11 @@ L3=$prefetcher_L3
 
 ByP_Type="Pf Based ByP"
 DB_FNAME="./CHAMPSIM_RESULTS.db"
-BYPASS_MODEL="none"
-sed -i "s/^isDebug=.*/isDebug=-1/" config_fast.ini
-sed -i "s/^doMinSim=.*/doMinSim=0/" config_fast.ini
-sed -i "s/^NUM_CORES=.*/NUM_CORES=2/" config_fast.ini
-sed -i "s/^isProfile=.*/isProfile=0/" config_fast.ini
+BYPASS_MODEL="no"
 PROCESSES_NUM=1
 
+ARCHIVE_PATH="$champsimDirName/src/ByP_Models/archive"
+mkdir -p $ARCHIVE_PATH
 parse_args() {
   echo "Function called with $# arguments: $@"
   shopt -s nocasematch
@@ -78,24 +82,25 @@ parse_args() {
         fi
 
         cp "$src" "$dst"
-
+        
+        
         echo -e "\033[1;91mLoaded bypass model: $model\033[0m"
         BYPASS_MODEL="$model"
         shift 2
     ;;
     -d|--debug)
       [[ -z "$2" || ( "$2" =~ ^- && ! "$2" =~ ^-[0-9]+$ ) ]] && { echo "Error: --debug requires a value"; exit 1; }
-      sed -i "s/^isDebug=.*/isDebug=$2/" config_fast.ini
+      isDebug="$2"
       shift 2 ;;
     -f|--fast)
-      sed -i "s/^doMinSim=.*/doMinSim=1/" config_fast.ini
+      doMinSim=1
       shift ;;
     -c|--cores)
       [[ -z "$2" || "$2" =~ ^- ]] && { echo "Error: --cores requires a value"; exit 1; }
-      sed -i "s/^NUM_CORES=.*/NUM_CORES=$2/" config_fast.ini
+      NUM_CORES="$2"
       shift 2 ;;
     --profile)
-      sed -i "s/^isProfile=.*/isProfile=1/" config_fast.ini
+      isProfile=1
       shift ;;
     --trace)
       trace="$2"
@@ -174,19 +179,9 @@ usage() {
 }
 
 parse_args "$@"
-# Store argument-set values before config reload
-ARG_L1="$L1"
-ARG_L2="$L2" 
-ARG_L3="$L3"
-eval $(grep -v '^#' config_fast.ini | xargs -d '\n')
-# Restore argument values after config reload
-L1="$ARG_L1"
-L2="$ARG_L2"
-L3="$ARG_L3"
-export DB_FNAME BYPASS_MODEL
-
-echo "L1" "$L1"
-cat config_fast.ini | grep -E 'isDebug=|doMinSim=|NUM_CORES=|isProfile='
+export DB_FNAME BYPASS_MODEL doMinSim isDebug NUM_CORES isProfile
+echo "L1: $L1, L2: $L2, L3: $L3"
+echo "isDebug=$isDebug doMinSim=$doMinSim NUM_CORES=$NUM_CORES isProfile=$isProfile"
 echo -e "\e[31m$ByP_Type\e[0m"
 status=0
 # arr of BUF_SZ values 
@@ -233,11 +228,13 @@ for buf in "${BUF_SZ[@]}"; do
     fi
     if [ "$isDebug" -eq 10 ]; then
           # ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" # | grep -E "Finished CPU|now IPC :" # # > /dev/null 2>&1
-          echo "./"$PfRunner".sh \"$trace\" \"$L1\" \"$L2\" \"$L3\""
+          echo "./"$PfRunner".sh \"$trace\" \"$L1\" \"$L2\" \"$L3\" "
           ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" "1"
           exit 0
     fi
   
+    
+    
     echo "=== ;$n; processes ==="
     for ((i = 0; i < n; i++)); do
       {
@@ -251,20 +248,37 @@ for buf in "${BUF_SZ[@]}"; do
         # OUT=$(./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" | grep "Finished" | head -n 1)
         # perf record -F 13500 -g -o perf.data ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" #| grep "Finished" | head -n 1)
         #      perf record -F 13499 --call-graph dwarf -o perf.data ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" #| grep -E "Finished CPU|now IPC :"
-
-        if [ "$isDebug" -gt 0 ]; then
-          ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" # | grep -E "Finished CPU|now IPC :" # # > /dev/null 2>&1 
-        else
-          if [ "$isDebug" -lt 0 ]; then
-            if [ "$isDebug" -eq -2 ]; then
-              ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" | grep -E "Finished CPU|FINAL ROI CORE AVG IPC:|Degree/Access Ratio|Global Hit Rate|DEADLOCK|SANITY|failed|Aborted" # > /dev/null 2>&1 
+        {
+        src=$(find "$champsimDirName/src/ByP_Models" -type f -name "${model}.bypass" -print -quit)
+        output=$(./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" | tee /dev/tty | {
+            if [ "$isDebug" -gt 0 ]; then
+            cat
+            elif [ "$isDebug" -eq -2 ]; then
+            grep -E "Finished CPU|FINAL ROI CORE AVG IPC:|Degree/Access Ratio|Global Hit Rate|DEADLOCK|SANITY|failed|Aborted"
             else
-              ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" | grep -E "Finished CPU|FINAL ROI CORE AVG IPC:|CFG|Degree/Access Ratio|Global Hit Rate|DEADLOCK|SANITY|trace_|_instructions |failed|Aborted" # # > /dev/null 2>&1 
+            grep -E "Finished CPU|FINAL ROI CORE AVG IPC:|CFG|Degree/Access Ratio|Global Hit Rate|DEADLOCK|SANITY|trace_|_instructions |now IPC:|failed|Aborted"
             fi
-          else 
-            ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" | grep -E "Finished CPU|FINAL ROI CORE AVG IPC:|CFG|Degree/Access Ratio|Global Hit Rate|DEADLOCK|SANITY|trace_|_instructions |now IPC:|failed|Aborted" # # > /dev/null 2>&1 
-          fi
-        fi 
+        })
+        } 3>&1
+
+        # Now extract only the FINAL ROI CORE AVG IPC: lines
+        ipc_result=$(echo "$output" | grep "FINAL ROI CORE AVG IPC:")
+        ipc_val=$(echo "$ipc_result" | grep -oP '(?<=FINAL ROI CORE AVG IPC: ;)[^;]+' | tail -n1 | tr '.' '_')
+        echo "$ipc_val"
+        cp -- "$src" "${ARCHIVE_PATH}/$(date +"%Y%m%d-%H%M%S")-${ipc_val}-${model}.bypass"
+        # if [ "$isDebug" -gt 0 ]; then
+        #   ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" # | grep -E "Finished CPU|now IPC :" # # > /dev/null 2>&1 
+        # else
+        #   if [ "$isDebug" -lt 0 ]; then
+        #     if [ "$isDebug" -eq -2 ]; then
+        #       ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" | grep -E "Finished CPU|FINAL ROI CORE AVG IPC:|Degree/Access Ratio|Global Hit Rate|DEADLOCK|SANITY|failed|Aborted" # > /dev/null 2>&1 
+        #     else
+        #       ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" | grep -E "Finished CPU|FINAL ROI CORE AVG IPC:|CFG|Degree/Access Ratio|Global Hit Rate|DEADLOCK|SANITY|trace_|_instructions |failed|Aborted" # # > /dev/null 2>&1 
+        #     fi
+        #   else 
+        #     ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" | grep -E "Finished CPU|FINAL ROI CORE AVG IPC:|CFG|Degree/Access Ratio|Global Hit Rate|DEADLOCK|SANITY|trace_|_instructions |now IPC:|failed|Aborted" # # > /dev/null 2>&1 
+        #   fi
+        # fi 
         #>&2; # | grep -E "Finished CPU" #|now IPC :"
         # echo "$n; $((ELAPSED / 1000)) "
         # echo "$full_output" #

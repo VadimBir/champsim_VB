@@ -29,7 +29,6 @@ static bool ByP_model_init = false;
 
 inline bool shall_L1D_Bypass_OnCacheMissedMSHRcap(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
     if (ByP_model_init == false){
-        // cout << "Bypass on: \navailable = (double)free * camat\nrq_unmatch = 1.0 - (lpmr_l2c / lpmr_l1d) \npq_unmatch = 1.0 - (lpmr_llc / lpmr_l2c) \nimmediate = (double)L2C->RQ.occupancy * rq_unmatch * 1.5 * camat + (double)L2C->PQ.occupancy * pq_unmatch * camat \nfuture = apc_l1d * (lpmr_l2c / lpmr_l1d) * camat + camat;" << endl;
         cout << "Bypass on: \nNO BYBPASS LOGIC" << endl;
         ByP_model_init = true;
     }

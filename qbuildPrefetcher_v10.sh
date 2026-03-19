@@ -1,5 +1,11 @@
 #!/bin/sh
-eval $(grep -v '^#' config_fast.ini | xargs -d '\n')
+arch="${arch:-glc}"
+NUM_CORES="${NUM_CORES:-2}"
+TRACE_PERCENT="${TRACE_PERCENT:-20}"
+tracesDirName="${tracesDirName:-traces}"
+isDebug="${isDebug:--1}"
+doMinSim="${doMinSim:-0}"
+isProfile="${isProfile:-0}"
 # Check for CLI args to override prefetchers
 [ -n "$1" ] && prefetcher_L1="$1"
 [ -n "$2" ] && prefetcher_L2="$2"

@@ -1,7 +1,13 @@
 #!/bin/sh
 
 # Load config
-eval $(grep -v '^#' config_fast.ini | xargs -d '\n')
+arch="${arch:-glc}"
+NUM_CORES="${NUM_CORES:-2}"
+TRACE_PERCENT="${TRACE_PERCENT:-20}"
+tracesDirName="${tracesDirName:-traces}"
+isDebug="${isDebug:--1}"
+doMinSim="${doMinSim:-0}"
+isProfile="${isProfile:-0}"
 DB_FNAME="${DB_FNAME:-./champsim_results/champsim_results.db}"
 
 champsimDirName=champsim_v10
@@ -10,7 +16,7 @@ PfRunner=qrun_champsim_v10
 
 
 FAST_WARMUP=500000
-FAST_SIM=3000000
+FAST_SIM=1000000
 
 # Require 1 argument from user
 if [ $# -ne 1 ] && [ $# -ne 4 ] && [ $# -ne 5 ]; then

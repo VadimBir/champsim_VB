@@ -9,7 +9,7 @@ traces/*
 *.log
 *.tar
 *aocc*.tar
-**/outputs/
+outputs/*
 *.tmp
 **/bin/
 **/pin_champsim_build_*/
