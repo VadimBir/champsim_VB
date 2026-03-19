@@ -250,6 +250,8 @@ for buf in "${BUF_SZ[@]}"; do
         #      perf record -F 13499 --call-graph dwarf -o perf.data ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" #| grep -E "Finished CPU|now IPC :"
         {
         src=$(find "$champsimDirName/src/ByP_Models" -type f -name "${model}.bypass" -print -quit)
+        tmp_snapshot="${ARCHIVE_PATH}/.${ts}-${model}.bypass.pre"
+        cp -- "$src" "$tmp_snapshot"
         output=$(./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" | tee /dev/tty | {
             if [ "$isDebug" -gt 0 ]; then
             cat
@@ -265,7 +267,7 @@ for buf in "${BUF_SZ[@]}"; do
         ipc_result=$(echo "$output" | grep "FINAL ROI CORE AVG IPC:")
         ipc_val=$(echo "$ipc_result" | grep -oP '(?<=FINAL ROI CORE AVG IPC: ;)[^;]+' | tail -n1 | tr '.' '_')
         echo "$ipc_val"
-        cp -- "$src" "${ARCHIVE_PATH}/$(date +"%Y%m%d-%H%M%S")-${ipc_val}-${model}.bypass"
+        mv -- "$tmp_snapshot" "${ARCHIVE_PATH}/$(date +"%Y%m%d-%H%M%S")-${ipc_val}-${model}.bypass"
         # if [ "$isDebug" -gt 0 ]; then
         #   ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" # | grep -E "Finished CPU|now IPC :" # # > /dev/null 2>&1 
         # else
