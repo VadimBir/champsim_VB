@@ -920,9 +920,6 @@ void CACHE::handle_read() {
                 HIT[RQ.entry[index].type]++;
                 ACCESS[RQ.entry[index].type]++;
 
-                if (RQ.entry[index].l1_bypassed != 0)
-                    total_ByP_cnt++;
-
                 // remove this entry from RQ
                 RQ.remove_queue(&RQ.entry[index]);
                 reads_available_this_cycle--;
@@ -941,6 +938,7 @@ void CACHE::handle_read() {
                                 };);
                             RQ.entry[index].l1_bypassed = 1;
                             RQ.entry[index].fill_level = FILL_L2;
+                            total_ByP_cnt++;
                             lower_level->add_rq(&RQ.entry[index]);
                         // }
                     } else
@@ -958,7 +956,7 @@ void CACHE::handle_read() {
                             };);
                         RQ.entry[index].llc_bypassed = 1;
                         RQ.entry[index].fill_level = FILL_DRAM;
-                        total_LLC_ByP_cnt++;
+                        total_ByP_cnt++;
                         lower_level->add_rq(&RQ.entry[index]);
                 } else
                 #endif

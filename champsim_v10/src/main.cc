@@ -303,19 +303,22 @@ void print_roi_stats(uint16_t cpu, CACHE *cache) {
     << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";RFO_cap" << ";" << std::right << setw(10) << cache->STALL[1] << ";"
     << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";Pf_MSHR_cap" << ";" << std::right << setw(10) << cache->STALL[2] << ";"
     << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";WrBk_MSHR_cap" << ";" << std::right << setw(10) << cache->STALL[3] << ";" << endl
-    // << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";APC" << ";" << std::right << setw(10) << lpm[cpu, L1D_type]->apc_val << ";" 
-    // << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";LPM" << ";" << std::right << setw(10) << lpm[cpu, L1D_type]->lpmr_val << ";" 
-    // << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";C-AMAT" << ";" << std::right << setw(10) << lpm[cpu, L1D_type]->c_amat_val << ";" << endl
+    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";miss_byp" << ";" << std::right << setw(10) << cache->total_ByP_cnt << ";"
     << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";APC" << ";" << std::right << setw(10) << lpm[cpu][cache->cache_type].apc_val << ";"
     << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";LPM" << ";" << std::right << setw(10) << lpm[cpu][cache->cache_type].lpmr_val << ";"
     << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";C-AMAT" << ";" << std::right << setw(10) << lpm[cpu][cache->cache_type].c_amat_val << ";" << endl
-#ifdef BYPASS_L1_LOGIC
-    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";L1_miss_byp" << ";" << std::right << setw(10) << cache->total_L1_ByP_cnt << ";" << endl
-#endif
-#ifdef BYPASS_LLC_LOGIC
-    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";LLC_miss_byp" << ";" << std::right << setw(10) << cache->total_LLC_ByP_cnt << ";" << endl
-#endif
-
+    
+    // #ifdef BYPASS_L1_LOGIC
+    //     if (cache->cache_type == IS_L1D)
+    //         cout << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";L1_miss_byp" << ";" << std::right << setw(10) << cache->total_L1_ByP_cnt << ";" << endl;
+    // #endif
+    // #ifdef BYPASS_LLC_LOGIC
+    //     if (cache->cache_type == IS_LLC)
+    //         cout << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";LLC_miss_byp" << ";" << std::right << setw(10) << cache->total_LLC_ByP_cnt << ";" << endl;
+    // #endif
+    // << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";APC" << ";" << std::right << setw(10) << lpm[cpu, L1D_type]->apc_val << ";" 
+    // << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";LPM" << ";" << std::right << setw(10) << lpm[cpu, L1D_type]->lpmr_val << ";" 
+    // << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";C-AMAT" << ";" << std::right << setw(10) << lpm[cpu, L1D_type]->c_amat_val << ";" << endl
     //      << " " STR_LPM
                     //  << setw(3) << right <<  FIXED_FLOAT2(get_LPMR_level(i, L1D_type))
                     //  << setw(3) << right <<  FIXED_FLOAT2(get_LPMR_level(i, L2C_type))
@@ -638,6 +641,9 @@ void print_deadlock(uint32_t i)
                 #ifdef BYPASS_L1_LOGIC
                 << " ByP: " << +queue->entry[j].l1_bypassed
 #endif
+#ifdef BYPASS_LLC_LOGIC
+                << " LByP: " << +queue->entry[j].llc_bypassed
+#endif
                 << " LQ: " << setw(3) << queue->entry[j].lq_index
                 << " SQ: " << setw(3) << queue->entry[j].sq_index;
 
@@ -652,6 +658,9 @@ void print_deadlock(uint32_t i)
                     << " fillLVL: " << setw(2) << +queue->entry[j+1].fill_level
                     #ifdef BYPASS_L1_LOGIC
                 << " ByP: " << +queue->entry[j].l1_bypassed
+#endif
+#ifdef BYPASS_LLC_LOGIC
+                << " LByP: " << +queue->entry[j].llc_bypassed
 #endif
                     << " LQ: " << setw(3) << queue->entry[j+1].lq_index
                     << " SQ: " << setw(3) << queue->entry[j+1].sq_index;
@@ -674,6 +683,9 @@ void print_deadlock(uint32_t i)
                 #ifdef BYPASS_L1_LOGIC
                 << " ByP: " << +queue->entry[j].l1_bypassed
 #endif
+#ifdef BYPASS_LLC_LOGIC
+                << " LByP: " << +queue->entry[j].llc_bypassed
+#endif
                 << " LQ: " << setw(3) << queue->entry[j].lq_index
                 << " SQ: " << setw(3) << queue->entry[j].sq_index;
 
@@ -687,6 +699,9 @@ void print_deadlock(uint32_t i)
                     << " fillLVL: " << setw(2) << +queue->entry[j+1].fill_level
                     #ifdef BYPASS_L1_LOGIC
                 << " ByP: " << +queue->entry[j].l1_bypassed
+#endif
+#ifdef BYPASS_LLC_LOGIC
+                << " LByP: " << +queue->entry[j].llc_bypassed
 #endif
                     << " LQ: " << setw(3) << queue->entry[j+1].lq_index
                     << " SQ: " << setw(3) << queue->entry[j+1].sq_index;

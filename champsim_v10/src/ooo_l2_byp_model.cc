@@ -36,7 +36,7 @@
 static bool l2_bypass_init = false;
 
 #define SHALL_L2C_BYPASS_DEFINED
-inline bool l2c_bypass_operate(int cpu, CACHE *L2C, CACHE *LLC) {
+inline bool l2c_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
     if (l2_bypass_init == false){
         cout << "Bypass on: \nNO BYBPASS LOGIC" << endl;
         l2_bypass_init = true;
