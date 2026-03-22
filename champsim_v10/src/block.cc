@@ -9,7 +9,7 @@ int PACKET_QUEUE::check_queue(PACKET *packet) {
             if (NAME == "L1D_WQ") {
                 __builtin_prefetch(&entry[i+8], 0, 3);
 #ifdef BYPASS_LOGIC_EQUIVALENCY_ON_ADDR_AND_BYPASS
-                if (entry[i].full_addr == packet->full_addr && (entry[i].bypassed_levels == packet->bypassed_levels)) {
+                if (entry[i].full_addr == packet->full_addr && entry[i].l1_bypassed == packet->l1_bypassed && entry[i].l2_bypassed == packet->l2_bypassed && entry[i].llc_bypassed == packet->llc_bypassed) {
 #else
                 if (entry[i].full_addr == packet->full_addr) {
 #endif
@@ -20,7 +20,7 @@ int PACKET_QUEUE::check_queue(PACKET *packet) {
             else {
                 __builtin_prefetch(&entry[i+8], 0, 3);
 #ifdef BYPASS_LOGIC_EQUIVALENCY_ON_ADDR_AND_BYPASS
-                if (entry[i].address == packet->address && (entry[i].bypassed_levels == packet->bypassed_levels)) {
+                if (entry[i].address == packet->address && entry[i].l1_bypassed == packet->l1_bypassed && entry[i].l2_bypassed == packet->l2_bypassed && entry[i].llc_bypassed == packet->llc_bypassed) {
 #else
                 if (entry[i].address == packet->address) {
 #endif
@@ -34,7 +34,7 @@ int PACKET_QUEUE::check_queue(PACKET *packet) {
             if (NAME == "L1D_WQ") {
                 __builtin_prefetch(&entry[i+8], 0, 3);
 #ifdef BYPASS_LOGIC_EQUIVALENCY_ON_ADDR_AND_BYPASS
-                if (entry[i].full_addr == packet->full_addr && (entry[i].bypassed_levels == packet->bypassed_levels)) {
+                if (entry[i].full_addr == packet->full_addr && entry[i].l1_bypassed == packet->l1_bypassed && entry[i].l2_bypassed == packet->l2_bypassed && entry[i].llc_bypassed == packet->llc_bypassed) {
 #else
                 if (entry[i].full_addr == packet->full_addr) {
 #endif
@@ -45,7 +45,7 @@ int PACKET_QUEUE::check_queue(PACKET *packet) {
             else {
                 __builtin_prefetch(&entry[i+8], 0, 3);
 #ifdef BYPASS_LOGIC_EQUIVALENCY_ON_ADDR_AND_BYPASS
-                if (entry[i].address == packet->address && (entry[i].bypassed_levels == packet->bypassed_levels)) {
+                if (entry[i].address == packet->address && entry[i].l1_bypassed == packet->l1_bypassed && entry[i].l2_bypassed == packet->l2_bypassed && entry[i].llc_bypassed == packet->llc_bypassed) {
 #else
                 if (entry[i].address == packet->address) {
 #endif
@@ -58,7 +58,7 @@ int PACKET_QUEUE::check_queue(PACKET *packet) {
             if (NAME == "L1D_WQ") {
                 __builtin_prefetch(&entry[i+8], 0, 3);
 #ifdef BYPASS_LOGIC_EQUIVALENCY_ON_ADDR_AND_BYPASS
-                if (entry[i].full_addr == packet->full_addr && (entry[i].bypassed_levels == packet->bypassed_levels)) {
+                if (entry[i].full_addr == packet->full_addr && entry[i].l1_bypassed == packet->l1_bypassed && entry[i].l2_bypassed == packet->l2_bypassed && entry[i].llc_bypassed == packet->llc_bypassed) {
 #else
                 if (entry[i].full_addr == packet->full_addr) {
 #endif
@@ -69,7 +69,7 @@ int PACKET_QUEUE::check_queue(PACKET *packet) {
             else {
                 __builtin_prefetch(&entry[i+8], 0, 3);
 #ifdef BYPASS_LOGIC_EQUIVALENCY_ON_ADDR_AND_BYPASS
-                if (entry[i].address == packet->address && (entry[i].bypassed_levels == packet->bypassed_levels)) {
+                if (entry[i].address == packet->address && entry[i].l1_bypassed == packet->l1_bypassed && entry[i].l2_bypassed == packet->l2_bypassed && entry[i].llc_bypassed == packet->llc_bypassed) {
 #else
                 if (entry[i].address == packet->address) {
 #endif

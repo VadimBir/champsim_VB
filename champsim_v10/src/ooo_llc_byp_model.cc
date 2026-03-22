@@ -1,0 +1,55 @@
+#include "cache.h"
+#include "lpm_tracker.h"
+
+#ifndef L1D_type
+#define L1D_type  4
+#define L2C_type  5
+#define LLC_type  6
+#endif
+
+// USEFUL VARS:  usage example
+//  * Cached metrics available without sim_access:
+//  *   lpm[cpu][IS_L1D].c_amat_val   <- w(L1D)/a(L1D)
+//  *   lpm[cpu][IS_L1D].apc_val      <- a(L1D)/w(L1D)
+//  *   lpm[cpu][IS_L1D].lpmr_val     <- w(L1D)/(IC*CPIexe)
+//  *   lpm[cpu][IS_L2C].mu()         <- miss-cycle fraction
+//  *   lpm[cpu][IS_L2C].kappa()      <- pure-miss fraction
+//  *
+//  * Also raw counters:
+//  *   lpm[cpu][IS_L1D].h, .m, .x, .e
+//  *   lpm[cpu][IS_L1D].omega()
+
+// LLC->MSHR.occupancy      LLC->MSHR.SIZE
+// LLC->RQ.occupancy        LLC->RQ.SIZE
+// LLC->PQ.occupancy        LLC->PQ.SIZE
+
+static bool llc_bypass_init = false;
+
+#define SHALL_LLC_BYPASS_DEFINED
+inline bool llc_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (llc_bypass_init == false){
+        cout << "LLC Bypass on: Clean APC LPM score: bypass when LLC pressure times layer mismatch exceeds one." << endl;
+        llc_bypass_init = true;
+    }
+
+if (LLC->MSHR.occupancy >= LLC->MSHR.SIZE)
+    return false;
+
+double apc_llc  = lpm[cpu][LLC_type].w_apc_val;
+double lpmr_l2 = lpm[cpu][L2C_type].w_lpmr_val;
+double lpmr_llc = lpm[cpu][LLC_type].w_lpmr_val;
+
+if (apc_llc  < 1e-6) apc_llc  = lpm[cpu][LLC_type].apc_val;
+if (lpmr_l2 < 1e-6) lpmr_l2 = lpm[cpu][L2C_type].lpmr_val;
+if (lpmr_llc < 1e-6) lpmr_llc = lpm[cpu][LLC_type].lpmr_val;
+
+if (apc_llc  < 1e-6) apc_llc  = 1e-6;
+if (lpmr_l2 < 1e-6) lpmr_l2 = 1e-6;
+if (lpmr_llc < 1e-6) lpmr_llc = 1e-6;
+
+double llc_util = (double)LLC->MSHR.occupancy / (double)LLC->MSHR.SIZE;
+
+double score = llc_util * apc_llc * (lpmr_l2 / lpmr_llc);
+
+return score > 1.0;
+}

@@ -42,7 +42,14 @@ L3=$prefetcher_L3
 ByP_Type="Pf Based ByP"
 DB_FNAME="./CHAMPSIM_RESULTS.db"
 BYPASS_MODEL="no"
+BYPASS_L2=0
+BYPASS_LLC=0
 PROCESSES_NUM=1
+
+ByP_Model_BASE=""
+ByP_NO_BASE=$champsimDirName/src/ByP_Models/no.l1_bypass
+L1_BYP_MODEL="no"
+L2_BYP_MODEL="no"
 
 ARCHIVE_PATH="$champsimDirName/src/ByP_Models/archive"
 mkdir -p $ARCHIVE_PATH
@@ -68,26 +75,77 @@ parse_args() {
         ByP_Type=$(grep -Eq '^[[:space:]]*#define[[:space:]]+BYPASS_L1D_OnNewMiss' "./$champsimDirName/inc/champsim.h" && echo "Cache Based ByP" || echo "Pf Based ByP"); shift ;;
     -ByPpf|-ByPpref|-PfByP)
         sed -i 's|^[[:space:]]*//\?[[:space:]]*#define BYPASS_L1D_OnNewMiss|// #define BYPASS_L1D_OnNewMiss|' "./$champsimDirName/inc/champsim.h"; shift ;;
-    -ByPModel|-ByPmodel|-bypmodel)
+    --l1byp|--L1byp|-l1byp)
         model="$2"
-
-        src=$(find "$champsimDirName/src/ByP_Models" -type f -name "${model}.bypass" -print -quit)
-        dst="$champsimDirName/src/ooo_ByP_Model.cc"
-        # src="$champsimDirName/src/ByP_Models/${model}.bypass"
-        # dst="$champsimDirName/src/ooo_ByP_Model.cc"
-
+        src=$(find "$champsimDirName/src/ByP_Models" -type f -name "${model}.l1_bypass" -print -quit)
+        dst="$champsimDirName/src/ooo_l1_byp_model.cc"
         if [[ ! -f "$src" ]]; then
-            echo -e "\033[1;91mERROR: bypass model '$model' not found\033[0m"
+            echo -e "\033[1;91mERROR: L1 bypass model '${model}.l1_bypass' not found\033[0m"
             exit 1
         fi
-
+        ByP_NO_BASE=$dst
         cp "$src" "$dst"
-        
-        
-        echo -e "\033[1;91mLoaded bypass model: $model\033[0m"
+        ByP_Type="Cache Based ByP"
+        L1_BYP_MODEL="$model"
         BYPASS_MODEL="$model"
-        shift 2
-    ;;
+        echo -e "\033[1;91mLoaded L1 bypass model: $model\033[0m"
+        shift 2 ;;
+    --l2byp|--L2byp|-l2byp)
+        model="$2"
+        src=$(find "$champsimDirName/src/ByP_Models" -type f -name "${model}.l2_bypass" -print -quit)
+        dst="$champsimDirName/src/ooo_l2_byp_model.cc"
+        if [[ ! -f "$src" ]]; then
+            echo -e "\033[1;91mERROR: L2 bypass model '${model}.l2_bypass' not found\033[0m"
+            exit 1
+        fi
+        cp "$src" "$dst"
+        BYPASS_L2=1
+        L2_BYP_MODEL="$model"
+        sed -i 's|^[[:space:]]*//[[:space:]]*#define BYPASS_L2_LOGIC|#define BYPASS_L2_LOGIC|' "./$champsimDirName/inc/champsim.h"
+        echo -e "\033[1;91mLoaded L2 bypass model: $model\033[0m"
+        shift 2 ;;
+    --noL2byp|--nol2byp)
+        BYPASS_L2=0
+        sed -i 's|^[[:space:]]*#define BYPASS_L2_LOGIC|// #define BYPASS_L2_LOGIC|' "./$champsimDirName/inc/champsim.h"; shift ;;
+    --L3byp|--l3byp|-L3byp)
+        model="$2"
+        if [[ -z "$model" || "$model" =~ ^- ]]; then
+            # No model name: just enable the define
+            BYPASS_LLC=1
+            sed -i 's|^[[:space:]]*//[[:space:]]*#define BYPASS_LLC_LOGIC|#define BYPASS_LLC_LOGIC|' "./$champsimDirName/inc/champsim.h"
+            shift
+        else
+            src=$(find "$champsimDirName/src/ByP_Models" -type f -name "${model}.llc_bypass" -print -quit)
+            dst="$champsimDirName/src/ooo_llc_byp_model.cc"
+            if [[ ! -f "$src" ]]; then
+                echo -e "\033[1;91mERROR: LLC bypass model '${model}.llc_bypass' not found\033[0m"
+                exit 1
+            fi
+            cp "$src" "$dst"
+            BYPASS_LLC=1
+            sed -i 's|^[[:space:]]*//[[:space:]]*#define BYPASS_LLC_LOGIC|#define BYPASS_LLC_LOGIC|' "./$champsimDirName/inc/champsim.h"
+            echo -e "\033[1;91mLoaded LLC bypass model: $model\033[0m"
+            shift 2
+        fi
+        ;;
+    --noL3byp|--nol3byp)
+        BYPASS_LLC=0
+        sed -i 's|^[[:space:]]*#define BYPASS_LLC_LOGIC|// #define BYPASS_LLC_LOGIC|' "./$champsimDirName/inc/champsim.h"; shift ;;
+    -ByPModel|-ByPmodel|-bypmodel)
+        echo -e "\033[1;93mWARN: -ByPModel is deprecated, use --l1byp ModelName instead\033[0m"
+        model="$2"
+        src=$(find "$champsimDirName/src/ByP_Models" -type f -name "${model}.l1_bypass" -print -quit)
+        dst="$champsimDirName/src/ooo_l1_byp_model.cc"
+        if [[ ! -f "$src" ]]; then
+            echo -e "\033[1;91mERROR: bypass model '${model}.l1_bypass' not found\033[0m"
+            exit 1
+        fi
+        ByP_NO_BASE=$dst
+        cp "$src" "$dst"
+        BYPASS_MODEL="$model"
+        L1_BYP_MODEL="$model"
+        echo -e "\033[1;91mLoaded L1 bypass model: $model\033[0m"
+        shift 2 ;;
     -d|--debug)
       [[ -z "$2" || ( "$2" =~ ^- && ! "$2" =~ ^-[0-9]+$ ) ]] && { echo "Error: --debug requires a value"; exit 1; }
       isDebug="$2"
@@ -149,6 +207,10 @@ usage() {
   echo ""
   echo "Bypass control (choose one):"
   echo "  -ByPModel       if using ByPca then a model file can be selected"
+  echo "  --L2byp         Enable L2 cache bypass"
+  echo "  --noL2byp       Disable L2 cache bypass"
+  echo "  --L3byp         Enable LLC cache bypass"
+  echo "  --noL3byp       Disable LLC cache bypass"
   echo ""
   echo "Simulation configuration:"
   echo "  --trace FILE              Trace file to run"
@@ -179,10 +241,11 @@ usage() {
 }
 
 parse_args "$@"
-export DB_FNAME BYPASS_MODEL doMinSim isDebug NUM_CORES isProfile
+export DB_FNAME BYPASS_MODEL doMinSim isDebug NUM_CORES isProfile BYPASS_L2 BYPASS_LLC L1_BYP_MODEL L2_BYP_MODEL
 echo "L1: $L1, L2: $L2, L3: $L3"
 echo "isDebug=$isDebug doMinSim=$doMinSim NUM_CORES=$NUM_CORES isProfile=$isProfile"
 echo -e "\e[31m$ByP_Type\e[0m"
+echo "L1byp_model=$L1_BYP_MODEL L2byp_model=$L2_BYP_MODEL L2byp=$BYPASS_L2 L3byp=$BYPASS_LLC"
 status=0
 # arr of BUF_SZ values 
 BUF_SZ=(512)
@@ -213,7 +276,7 @@ for buf in "${BUF_SZ[@]}"; do
       # set output colour red and use it in the error output 
       redColour="\033[1;91m"
       resetColour="\033[0m"
-      greenColour="\033[1;92m"
+      greenColour="\033[1;92m" 
       if [ $status -ne 0 ]; then
         # echo "Build failed (exit code $status)"
         echo -e "${redColour}*** BUILD FAIL ***"
@@ -226,6 +289,10 @@ for buf in "${BUF_SZ[@]}"; do
         echo -e "${greenColour}Build successful${resetColour}"
       fi
     fi
+    
+    cp $ByP_NO_BASE $BYPASS_MODEL
+    sync
+    
     if [ "$isDebug" -eq 10 ]; then
           # ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" # | grep -E "Finished CPU|now IPC :" # # > /dev/null 2>&1
           echo "./"$PfRunner".sh \"$trace\" \"$L1\" \"$L2\" \"$L3\" "
@@ -233,7 +300,7 @@ for buf in "${BUF_SZ[@]}"; do
           exit 0
     fi
   
-    
+    # exit 1
     
     echo "=== ;$n; processes ==="
     for ((i = 0; i < n; i++)); do
@@ -249,25 +316,32 @@ for buf in "${BUF_SZ[@]}"; do
         # perf record -F 13500 -g -o perf.data ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" #| grep "Finished" | head -n 1)
         #      perf record -F 13499 --call-graph dwarf -o perf.data ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" #| grep -E "Finished CPU|now IPC :"
         {
-        src=$(find "$champsimDirName/src/ByP_Models" -type f -name "${model}.bypass" -print -quit)
-        tmp_snapshot="${ARCHIVE_PATH}/.${ts}-${model}.bypass.pre"
+        src=$(find "$champsimDirName/src/ByP_Models" -type f -name "${BYPASS_MODEL}.l1_bypass" -print -quit)
+        tmp_snapshot="${ARCHIVE_PATH}/.${ts}-${BYPASS_MODEL}.l1_bypass.pre"
         cp -- "$src" "$tmp_snapshot"
-        output=$(./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" | tee /dev/tty | {
-            if [ "$isDebug" -gt 0 ]; then
-            cat
-            elif [ "$isDebug" -eq -2 ]; then
-            grep -E "Finished CPU|FINAL ROI CORE AVG IPC:|Degree/Access Ratio|Global Hit Rate|DEADLOCK|SANITY|failed|Aborted"
-            else
-            grep -E "Finished CPU|FINAL ROI CORE AVG IPC:|CFG|Degree/Access Ratio|Global Hit Rate|DEADLOCK|SANITY|trace_|_instructions |now IPC:|failed|Aborted"
-            fi
-        })
-        } 3>&1
+
+        ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" 
+        # ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" 2>&1 \
+        # | tee "Epoch10-$BYPASS_MODEL-$(date '+%Y%m%d-%H%M%S').log" \
+        # | cat \
+        # | {
+        #     if [ "$isDebug" -gt 0 ]; then
+        #         cat
+        #     elif [ "$isDebug" -eq -2 ]; then
+        #         grep -E "Finished CPU|FINAL ROI CORE AVG IPC:|Degree/Access Ratio|Global Hit Rate|DEADLOCK|SANITY|failed|Aborted"
+        #     else
+        #         grep -E "Finished CPU|FINAL ROI CORE AVG IPC:"
+        #     fi
+        # }
+        # } 3>&1
+
+        }
 
         # Now extract only the FINAL ROI CORE AVG IPC: lines
         ipc_result=$(echo "$output" | grep "FINAL ROI CORE AVG IPC:")
         ipc_val=$(echo "$ipc_result" | grep -oP '(?<=FINAL ROI CORE AVG IPC: ;)[^;]+' | tail -n1 | tr '.' '_')
         echo "$ipc_val"
-        mv -- "$tmp_snapshot" "${ARCHIVE_PATH}/$(date +"%Y%m%d-%H%M%S")-${ipc_val}-${model}.bypass"
+        mv -- "$tmp_snapshot" "${ARCHIVE_PATH}/$(date +"%Y%m%d-%H%M%S")-${ipc_val}-${BYPASS_MODEL}.l1_bypass"
         # if [ "$isDebug" -gt 0 ]; then
         #   ./"$PfRunner".sh "$trace" "$L1" "$L2" "$L3" # | grep -E "Finished CPU|now IPC :" # # > /dev/null 2>&1 
         # else

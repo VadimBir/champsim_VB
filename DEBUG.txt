@@ -1,0 +1,34 @@
+Function called with 20 arguments: -p 1 --L1 next_line-1-2-4 --L2 ip_stride --L3 no --trace LLM256.Pythia-70M_21M -d 2 -c 1 -bypca --l1byp ByP_cleanApcLpmScore --l3byp ByP_cleanApcLpmScore -f
+[1;91mLoaded L1 bypass model: ByP_cleanApcLpmScore[0m
+[1;91mLoaded LLC bypass model: ByP_cleanApcLpmScore[0m
+L1: next_line-1-2-4, L2: ip_stride, L3: no
+isDebug=2 doMinSim=1 NUM_CORES=1 isProfile=0
+[31mCache Based ByP[0m
+L1byp_model=ByP_cleanApcLpmScore L2byp_model=no L2byp=0 L3byp=1
+=== BUF_SZ = 512 === TRACE: LLM256.Pythia-70M_21M
+    *** BUILDING ***
+DEBUG: Building prefetcher with L1: next_line-1-2-4, L2: ip_stride, L3: no
+=== Building Champsim with prefetchers: next_line-1-2-4, ip_stride, no ===
+Cores: 1
+Building ChampSim in isolated workdir: /tmp/champsim_builds/build.Ftt2uU
+Cores: 1 | Core architecture: glc_1c
+L1D: next_line-1-2-4 | L2C: ip_stride | LLC: no
+Replacement: lru
+PGO: profiles_v4/PGO_4_SPEC_LLM.profdata
+
+>>> Detected compiler: clang [clang++]
+=== Forcing Clang compilation ===
+make[1]: Entering directory '/tmp/champsim_builds/build.Ftt2uU'
+>>> Detected compiler: clang [clang++]
+Generating dependencies for src/main.cc...
+Generating dependencies for src/ooo_l1_byp_model.cc...
+Compiling src/main.cc...
+Compiling src/ooo_l1_byp_model.cc...
+Generating dependencies for src/uncore.cc...
+Compiling src/uncore.cc...
+
+[ERROR] Build failed. Workdir kept for debug:
+        /tmp/champsim_builds/build.Ftt2uU
+
+[ERROR] Build failed. Workdir kept for debug:
+        /tmp/champsim_builds/build.Ftt2uU

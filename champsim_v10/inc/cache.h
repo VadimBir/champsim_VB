@@ -58,9 +58,28 @@ class CACHE : public MEMORY {
 
     uint64_t total_miss_latency;
 // VB: CCUSTOM CODE START
-    uint64_t total_ByP_cnt; 
+    uint64_t total_ByP_cnt;
+    uint64_t total_L1_ByP_cnt = 0;
+    uint64_t total_L2_ByP_cnt = 0;
+    uint64_t total_LLC_ByP_cnt = 0;
     bool FORCE_ALL_HITS; // VB CUSTOM
-    bool BYPASS_L1D_Cache = false; // VB CUSTOM
+    uint8_t is_bypassing = 0;   // bit0=L1 bit1=L2 bit2=LLC
+
+// Bypass bit encoding for CACHE::is_bypassing config flag: L1=1, L2=2, LLC=4
+#define BYP_L1_BIT   1u
+#define BYP_L2_BIT   2u
+#define BYP_LLC_BIT  4u
+
+// Bypass per-level flags (separate variables, no cross-level interference)
+#define BYPASS_L1(pkt)     ((pkt).l1_bypassed = 1)
+#define BYPASS_L2(pkt)     ((pkt).l2_bypassed = 1)
+#define BYPASS_LLC(pkt)    ((pkt).llc_bypassed = 1)
+#define UNBYPASS_L1(pkt)   ((pkt).l1_bypassed = 0)
+#define UNBYPASS_L2(pkt)   ((pkt).l2_bypassed = 0)
+#define UNBYPASS_LLC(pkt)  ((pkt).llc_bypassed = 0)
+#define isBYPASSING_L1(pkt)  ((pkt).l1_bypassed)
+#define isBYPASSING_L2(pkt)  ((pkt).l2_bypassed)
+#define isBYPASSING_LLC(pkt) ((pkt).llc_bypassed)
     
     // bool BYPASS_L1D_OnNewMiss = false; // VB CUSTOM
     bool BYPASS_L1D_on_MSHR_cap = false; // VB CUSTOM

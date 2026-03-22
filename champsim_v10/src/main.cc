@@ -306,9 +306,15 @@ void print_roi_stats(uint16_t cpu, CACHE *cache) {
     // << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";APC" << ";" << std::right << setw(10) << lpm[cpu, L1D_type]->apc_val << ";" 
     // << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";LPM" << ";" << std::right << setw(10) << lpm[cpu, L1D_type]->lpmr_val << ";" 
     // << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";C-AMAT" << ";" << std::right << setw(10) << lpm[cpu, L1D_type]->c_amat_val << ";" << endl
-    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";APC" << ";" << std::right << setw(10) << lpm[cpu][cache->cache_type].apc_val << ";" 
-    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";LPM" << ";" << std::right << setw(10) << lpm[cpu][cache->cache_type].lpmr_val << ";" 
+    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";APC" << ";" << std::right << setw(10) << lpm[cpu][cache->cache_type].apc_val << ";"
+    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";LPM" << ";" << std::right << setw(10) << lpm[cpu][cache->cache_type].lpmr_val << ";"
     << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";C-AMAT" << ";" << std::right << setw(10) << lpm[cpu][cache->cache_type].c_amat_val << ";" << endl
+#ifdef BYPASS_L1_LOGIC
+    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";L1_miss_byp" << ";" << std::right << setw(10) << cache->total_L1_ByP_cnt << ";" << endl
+#endif
+#ifdef BYPASS_LLC_LOGIC
+    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";LLC_miss_byp" << ";" << std::right << setw(10) << cache->total_LLC_ByP_cnt << ";" << endl
+#endif
 
     //      << " " STR_LPM
                     //  << setw(3) << right <<  FIXED_FLOAT2(get_LPMR_level(i, L1D_type))
@@ -629,7 +635,9 @@ void print_deadlock(uint32_t i)
                 << " fuAddr: " << setw(12) << queue->entry[j].full_addr << dec
                 << " type: " << +queue->entry[j].type
                 << " fillLVL: " << setw(2) << +queue->entry[j].fill_level
-                << " ByP: " << +queue->entry[j].bypassed_levels
+                #ifdef BYPASS_L1_LOGIC
+                << " ByP: " << +queue->entry[j].l1_bypassed
+#endif
                 << " LQ: " << setw(3) << queue->entry[j].lq_index
                 << " SQ: " << setw(3) << queue->entry[j].sq_index;
 
@@ -642,7 +650,9 @@ void print_deadlock(uint32_t i)
                     << " fuAddr: " << setw(12) << queue->entry[j+1].full_addr << dec
                     << " type: " << +queue->entry[j+1].type
                     << " fillLVL: " << setw(2) << +queue->entry[j+1].fill_level
-                    << " ByP: " << +queue->entry[j].bypassed_levels
+                    #ifdef BYPASS_L1_LOGIC
+                << " ByP: " << +queue->entry[j].l1_bypassed
+#endif
                     << " LQ: " << setw(3) << queue->entry[j+1].lq_index
                     << " SQ: " << setw(3) << queue->entry[j+1].sq_index;
             }
@@ -661,7 +671,9 @@ void print_deadlock(uint32_t i)
                 << " fuAddr: " << setw(12) << queue->entry[j].full_addr << dec
                 << " type: " << +queue->entry[j].type
                 << " fillLVL: " << setw(2) << +queue->entry[j].fill_level
-                << " ByP: " << +queue->entry[j].bypassed_levels
+                #ifdef BYPASS_L1_LOGIC
+                << " ByP: " << +queue->entry[j].l1_bypassed
+#endif
                 << " LQ: " << setw(3) << queue->entry[j].lq_index
                 << " SQ: " << setw(3) << queue->entry[j].sq_index;
 
@@ -673,7 +685,9 @@ void print_deadlock(uint32_t i)
                     << " fuAddr: " << setw(12) << queue->entry[j+1].full_addr << dec
                     << " type: " << +queue->entry[j+1].type
                     << " fillLVL: " << setw(2) << +queue->entry[j+1].fill_level
-                    << " ByP: " << +queue->entry[j].bypassed_levels
+                    #ifdef BYPASS_L1_LOGIC
+                << " ByP: " << +queue->entry[j].l1_bypassed
+#endif
                     << " LQ: " << setw(3) << queue->entry[j+1].lq_index
                     << " SQ: " << setw(3) << queue->entry[j+1].sq_index;
             }
@@ -1068,7 +1082,6 @@ void print_knobs()
         << "dram_pages\t;" << DRAM_PAGES<<"; " << endl
         << endl;
     print_core_config();
-    print_cache_config();
     print_dram_config();
     cout << endl;
 }
@@ -1563,9 +1576,9 @@ if (num_instr_dest == 2) {
                      << setw(3) << right <<  FIXED_FLOAT2(lpm[i][LLC_type].lpmr_val) 
                      << left 
                      << " " STR_cAMT
-                     << setw(3) << right <<  FIXED_FLOAT2(lpm[i][L1D_type].c_amat_val) << " " 
-                     << setw(3) << right <<  FIXED_FLOAT2(lpm[i][L2C_type].c_amat_val) << " "
-                     << setw(3) << right <<  FIXED_FLOAT2(lpm[i][LLC_type].c_amat_val) 
+                     << setw(5) << right <<  FIXED_FLOAT2(lpm[i][L1D_type].c_amat_val) << " " 
+                     << setw(5) << right <<  FIXED_FLOAT2(lpm[i][L2C_type].c_amat_val) << " "
+                     << setw(5) << right <<  FIXED_FLOAT2(lpm[i][LLC_type].c_amat_val) 
                      << left 
                      << " " << STR_MSHR_OCCUPANCY_PERCENT
                      << setw(3) << right << (int)(((float)ooo_cpu[i].L1D.MSHR.occupancy/(float)ooo_cpu[i].L1D.MSHR.SIZE)*100)

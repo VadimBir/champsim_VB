@@ -33,6 +33,9 @@
 #define BYPASS_SANITY_CHECK
 // #define BYPASS_DEBUG
 #define BYPASS_LOGIC
+#define BYPASS_L1_LOGIC
+#define BYPASS_L2_LOGIC    // uncomment at Stage 2
+#define BYPASS_LLC_LOGIC   // uncomment at Stage 3
 // #define BYPASS_LOGIC_EQUIVALENCY_ON_ADDR_AND_BYPASS
 
 #define ROB_FLAGS
@@ -44,7 +47,9 @@
 #define DRAM_SANITY_CHECK
 
 #define main_SANITY_CHECK
+
 // #define DEBUG_PRINT
+
 #ifdef DEBUG_PRINT
 // #define DP(x) x
 #define DP(x) x

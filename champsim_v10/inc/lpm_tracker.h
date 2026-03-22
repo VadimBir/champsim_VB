@@ -21,7 +21,7 @@
  *
  * Two LPMR methods:
  *   get_LPMR_std(): Paper standard. L1D as reference.
- *   get_LPMR_byp(): Bypass-corrected. Subtracts m_byp.
+ *   get_LPMR_byp(): Bypass-corrected. Subtracts l1d_m_byp.
  */
 
 #ifndef LPM_TRACKER_H
@@ -51,7 +51,8 @@ struct LPM_Tracker {
     uint64_t h, m, x, e;
 
     /* --- bypass correction (L2C only) --- */
-    uint64_t m_byp;
+    uint64_t l1d_m_byp;
+    uint64_t llc_m_byp;
 
     /* --- cached metrics (updated per lpm_operate) --- */
     double   c_amat_val;       /* ω/α            [eq 30] */
@@ -70,7 +71,7 @@ struct LPM_Tracker {
     uint8_t  last_class;
 
     void init() {
-        h = m = x = e = m_byp = 0;
+        h = m = x = e = l1d_m_byp = llc_m_byp= 0;
         c_amat_val = apc_val = lpmr_val = 0.0;
         w_h = w_m = w_x = w_e = 0;
         w_tick = 0;
@@ -102,9 +103,13 @@ struct LPM_Tracker {
     inline void tick_byp(bool ha, bool ma,
                          bool has_byp_miss, bool l1d_pure_miss) {
         tick(ha, ma);
-        m_byp += (last_class == LPM_CLASS_M)
+        l1d_m_byp += (last_class == LPM_CLASS_M)
                & has_byp_miss
                & (!l1d_pure_miss);
+        // llc_m_byp += (last_class == LPM_CLASS_M)
+        //        & has_byp_miss
+        //        & (!llc);
+        // llc_m_byp
     }
 
     /* Update cached metrics. Called after tick().
@@ -155,7 +160,7 @@ inline void lpm_init() {
  *   hit_active:       (RQ.occ | WQ.occ | PQ.occ) > 0
  *   miss_active:      MSHR has active misses (mode-dependent)
  *   alpha:            sum of sim_access[cpu][0..NUM_TYPES-1]
- *   has_byp_miss:     (L2C only) any MSHR entry with bypassed_levels>0
+ *   has_byp_miss:     (L2C only) any MSHR entry with l1_bypassed|l2_bypassed|llc_bypassed>0
  *
  * Ticks counter, updates cached c_amat/apc/lpmr.
  * LPMR denominator: IC×CPIexe = e(L1D)+h(L1D)+x(L1D)  [eq 4,18]
@@ -163,7 +168,7 @@ inline void lpm_init() {
 inline void lpm_operate(int cpu, uint8_t cache_type,
                         bool hit_active, bool miss_active,
                         uint64_t alpha, bool has_byp_miss) {
-#ifdef BYPASS_LOGIC
+#ifdef BYPASS_L1_LOGIC
     if (cache_type == IS_L2C) {
         bool l1d_pm = (lpm[cpu][LPM_L1D].last_class == LPM_CLASS_M);
         lpm[cpu][cache_type].tick_byp(hit_active, miss_active,
@@ -210,7 +215,7 @@ inline double get_LPMR_std(int cpu, uint8_t ct) {
 inline double get_LPMR_byp(int cpu, uint8_t ct) {
     const LPM_Tracker& ref = lpm[cpu][LPM_L1D];
     uint64_t app = ref.e + ref.h + ref.x;
-    uint64_t cor = lpm[cpu][LPM_L2C].m_byp;
+    uint64_t cor = lpm[cpu][LPM_L2C].l1d_m_byp;
     uint64_t ideal = (app > cor) ? (app - cor) : 1;
     return (double)lpm[cpu][ct].omega() / ideal;
 }
@@ -247,8 +252,8 @@ inline void lpm_print(int cpu) {
             printf(" | %10s %10s | %8s %8s", "n/a","n/a","n/a","n/a");
         printf("\n");
     }
-    if (lpm[cpu][LPM_L2C].m_byp > 0)
-        printf("L2C m_byp: %lu\n", lpm[cpu][LPM_L2C].m_byp);
+    if (lpm[cpu][LPM_L2C].l1d_m_byp > 0)
+        printf("L2C l1d_m_byp: %lu\n", lpm[cpu][LPM_L2C].l1d_m_byp);
     printf("Global LPMR_std: %.6f  LPMR_byp: %.6f\n",
            get_LPMR_global_std(cpu), get_LPMR_global_byp(cpu));
 }
@@ -300,7 +305,7 @@ inline void lpm_print(int cpu) {
 //     uint64_t h, m, x, e;
 
 //     /* --- bypass correction (L2C only) --- */
-//     uint64_t m_byp;
+//     uint64_t l1d_m_byp;
 
 //     /* --- cached metrics (updated per lpm_operate) --- */
 //     double   c_amat_val;       /* omega/alpha            [eq 30] */
@@ -323,7 +328,7 @@ inline void lpm_print(int cpu) {
 //     uint64_t w_alpha;          /* decayed windowed access count derived from alpha deltas */
 
 //     void init() {
-//         h = m = x = e = m_byp = 0;
+//         h = m = x = e = l1d_m_byp = 0;
 //         c_amat_val = apc_val = lpmr_val = 0.0;
 
 //         w_h = w_m = w_x = w_e = 0;
@@ -371,7 +376,7 @@ inline void lpm_print(int cpu) {
 
 //         /* keep original intent, but use logical ops explicitly */
 //         if ((last_class == LPM_CLASS_M) && has_byp_miss && (!l1d_pure_miss))
-//             ++m_byp;
+//             ++l1d_m_byp;
 //     }
 
 //     /* Update cached metrics. Called after tick().
@@ -456,7 +461,7 @@ inline void lpm_print(int cpu) {
 //  *   hit_active:       binary hit-side activity
 //  *   miss_active:      binary miss-side activity
 //  *   alpha:            cumulative accesses at this level
-//  *   has_byp_miss:     (L2C only) any MSHR entry with bypassed_levels>0
+//  *   has_byp_miss:     (L2C only) any MSHR entry with l1_bypassed|l2_bypassed|llc_bypassed>0
 //  *
 //  * NOTE:
 //  *   This remains a binary-activity tracker.
@@ -466,7 +471,7 @@ inline void lpm_print(int cpu) {
 // inline void lpm_operate(int cpu, uint8_t cache_type,
 //                         bool hit_active, bool miss_active,
 //                         uint64_t alpha, bool has_byp_miss) {
-// #ifdef BYPASS_LOGIC
+// #ifdef BYPASS_L1_LOGIC
 //     if (cache_type == IS_L2C) {
 //         bool l1d_pm = (lpm[cpu][LPM_L1D].last_class == LPM_CLASS_M);
 //         lpm[cpu][cache_type].tick_byp(hit_active, miss_active,
@@ -518,7 +523,7 @@ inline void lpm_print(int cpu) {
 // inline double get_LPMR_byp(int cpu, uint8_t ct) {
 //     const LPM_Tracker& ref = lpm[cpu][LPM_L1D];
 //     uint64_t app = ref.e + ref.h + ref.x;
-//     uint64_t cor = lpm[cpu][LPM_L2C].m_byp;
+//     uint64_t cor = lpm[cpu][LPM_L2C].l1d_m_byp;
 //     uint64_t ideal = (app > cor) ? (app - cor) : 1;
 //     return static_cast<double>(lpm[cpu][ct].omega()) / static_cast<double>(ideal);
 // }
@@ -566,8 +571,8 @@ inline void lpm_print(int cpu) {
 //         printf("\n");
 //     }
 
-//     if (lpm[cpu][LPM_L2C].m_byp > 0)
-//         printf("L2C m_byp: %lu\n", lpm[cpu][LPM_L2C].m_byp);
+//     if (lpm[cpu][LPM_L2C].l1d_m_byp > 0)
+//         printf("L2C l1d_m_byp: %lu\n", lpm[cpu][LPM_L2C].l1d_m_byp);
 
 //     printf("Global LPMR_std: %.6f  LPMR_byp: %.6f\n",
 //            get_LPMR_global_std(cpu), get_LPMR_global_byp(cpu));

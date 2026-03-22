@@ -17,7 +17,7 @@
 
 
 // #define PRINT_STATS_EVERY 1000000
-#define PRINT_STATS_EVERY 500000
+#define PRINT_STATS_EVERY 1000000
 #ifdef CRC2_COMPILE
 #define STAT_PRINTING_PERIOD PRINT_STATS_EVERY // print stats every X instructions
 #else

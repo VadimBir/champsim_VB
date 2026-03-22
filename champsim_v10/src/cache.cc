@@ -1,6 +1,11 @@
 #include "cache.h"
 #include "set.h"
-#include "ooo_ByP_Model.cc"
+#include "ooo_l1_byp_model.cc"
+// #include "ooo_l2_byp_model.cc"
+#ifdef BYPASS_LLC_LOGIC
+#include "ooo_llc_byp_model.cc"
+#endif
+
 uint64_t l2pf_access = 0;
 bool FORCE_ALL_HITS = false;
 
@@ -51,7 +56,7 @@ inline void dump_req(PACKET& o)
         }
     }
     cout << "} ";
-    cout << "ByP " << int(o.bypassed_levels);
+    cout << "ByP " << int(o.l1_bypassed);
 }
 inline void dump_req(PACKET* o)
 {
@@ -87,7 +92,7 @@ inline void dump_req(PACKET* o)
         }
     }
     cout << "} ";
-    cout << "ByP " << int(o->bypassed_levels);
+    cout << "ByP " << int(o->l1_bypassed);
 }
 
 
@@ -262,7 +267,7 @@ void CACHE::handle_fill() {
                     writeback_packet.type = WRITEBACK;
                     writeback_packet.event_cycle = current_core_cycle[fill_cpu];
 #ifdef BYPASS_DEBUG
-                    if (MSHR.entry[mshr_index].bypassed_levels == 1)
+                    if (MSHR.entry[mshr_index].l1_bypassed == 1)
                         cerr << " THIS IS WriteBack that HAS ByP set ... " << endl;
 #endif
 
@@ -364,7 +369,7 @@ void CACHE::handle_fill() {
                         cout << "[" << NAME << "_FILL_PROCESSED] " << __func__ << " L1D add processed instrID: " <<  MSHR.entry[mshr_index].instr_id;
                         cout << " addr: " <<  hex << MSHR.entry[mshr_index].address << " full_addr: " << MSHR.entry[mshr_index].full_addr << dec;
                         cout << " occupancy: " << (int)MSHR.occupancy << " event cy: " << MSHR.entry[mshr_index].event_cycle << " curr cy: " << current_core_cycle[cpu];
-                        cout << " BYP: " << (int)MSHR.entry[mshr_index].bypassed_levels << " type: " << (int)MSHR.entry[mshr_index].type << " fill lvl: " << (int)MSHR.entry[mshr_index].fill_level;
+                        cout << " BYP: " << (int)MSHR.entry[mshr_index].l1_bypassed << " type: " << (int)MSHR.entry[mshr_index].type << " fill lvl: " << (int)MSHR.entry[mshr_index].fill_level;
                         cout << endl;
                     });
                     PROCESSED.add_queue(&MSHR.entry[mshr_index]);
@@ -373,11 +378,11 @@ void CACHE::handle_fill() {
                     assert(0&&"RETURN IS LOST FOREVER!!!! ");
                 }
             }
-#ifdef BYPASS_LOGIC
-            else if ((cache_type == IS_L2C) && (MSHR.entry[mshr_index].type == LOAD) && MSHR.entry[mshr_index].bypassed_levels == 1 ) {
+#ifdef BYPASS_L1_LOGIC
+            else if ((cache_type == IS_L2C) && (MSHR.entry[mshr_index].type == LOAD) && MSHR.entry[mshr_index].l1_bypassed == 1 ) {
                 if (PROCESSED.occupancy < PROCESSED.SIZE){
 #ifdef BYPASS_DEBUG
-                    cout << " L2C ByP complete? " << (int) MSHR.entry[mshr_index].bypassed_levels << endl;
+                    cout << " L2C ByP complete? " << (int) MSHR.entry[mshr_index].l1_bypassed << endl;
                     cout << " L2C IS completing some packets: " << " instrID: " <<  MSHR.entry[mshr_index].instr_id  << " rob: " <<  MSHR.entry[mshr_index].rob_index << " addr: " <<  MSHR.entry[mshr_index].address << endl;
 #endif
                     DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[MSHR.entry[mshr_index].cpu]) {
@@ -385,7 +390,7 @@ void CACHE::handle_fill() {
                         cout << "[" << NAME << "_FILL_ByP_PROCESSED] " << __func__ << " L2C=>L1D add processed instrID: " <<  MSHR.entry[mshr_index].instr_id;
                         cout << " addr: " <<  hex << MSHR.entry[mshr_index].address << " full_addr: " << MSHR.entry[mshr_index].full_addr << dec;
                         cout << " occupancy: " << (int)MSHR.occupancy << " event cy: " << MSHR.entry[mshr_index].event_cycle << " curr cy: " << current_core_cycle[cpu];
-                        cout << " BYP: " << (int)MSHR.entry[mshr_index].bypassed_levels << " type: " << (int)MSHR.entry[mshr_index].type << " fill lvl: " << (int)MSHR.entry[mshr_index].fill_level;
+                        cout << " BYP: " << (int)MSHR.entry[mshr_index].l1_bypassed << " type: " << (int)MSHR.entry[mshr_index].type << " fill lvl: " << (int)MSHR.entry[mshr_index].fill_level;
                         cout << endl;
                     });
                     PROCESSED.add_queue(&MSHR.entry[mshr_index]);
@@ -463,7 +468,7 @@ void CACHE::handle_fill() {
 	        }
 #ifdef BYPASS_DEBUG
             if (MSHR.entry[mshr_index].instr_id == 2001730)
-                cout << " CATCH !!! instr: " << MSHR.entry[mshr_index].instr_id << " ByP: " << (int) MSHR.entry[mshr_index].bypassed_levels << endl;
+                cout << " CATCH !!! instr: " << MSHR.entry[mshr_index].instr_id << " ByP: " << (int) MSHR.entry[mshr_index].l1_bypassed << endl;
 #endif
 
             MSHR.remove_queue(&MSHR.entry[mshr_index]);
@@ -473,13 +478,18 @@ void CACHE::handle_fill() {
         }
     }
 }
+
 inline void CACHE::merge_with_prefetch(PACKET &mshr_packet, PACKET &queue_packet ) {
     // ORIGINAL info retainer
     uint8_t prior_returned = mshr_packet.returned;
     uint64_t prior_event_cycle = mshr_packet.event_cycle;
-#ifdef BYPASS_LOGIC
+#ifdef BYPASS_L1_LOGIC
     // uint8_t  prior_bypassed = mshr_packet.bypassed_levels;
     uint8_t prior_fill = mshr_packet.fill_level;
+    uint8_t prior_l1_bypassed = mshr_packet.l1_bypassed;
+#endif
+#ifdef BYPASS_LLC_LOGIC
+    uint8_t prior_llc_bypassed = mshr_packet.llc_bypassed;
 #endif
 #ifdef DEBUG_PRINT
     if (warmup_complete[0])
@@ -491,7 +501,13 @@ inline void CACHE::merge_with_prefetch(PACKET &mshr_packet, PACKET &queue_packet
     mshr_packet.returned = prior_returned;
     mshr_packet.event_cycle = prior_event_cycle;
     // mshr_packet.bypassed_levels = prior_bypassed;
+#ifdef BYPASS_L1_LOGIC
     mshr_packet.fill_level = prior_fill;
+    mshr_packet.l1_bypassed = prior_l1_bypassed;
+#endif
+#ifdef BYPASS_LLC_LOGIC
+    mshr_packet.llc_bypassed = prior_llc_bypassed;
+#endif
 //     if (cache_type == IS_L2C) {
 //         // === FIX: push bypass LQ deps into L1D MSHR now ===
 //         auto *l1d = (CACHE *) this->upper_level_dcache[cpu];
@@ -502,7 +518,7 @@ inline void CACHE::merge_with_prefetch(PACKET &mshr_packet, PACKET &queue_packet
 //             // ORIGINAL info retainer
 //             uint8_t prior_returned = l1d->MSHR.entry[l1d_mshr].returned;
 //             uint64_t prior_event_cycle = l1d->MSHR.entry[l1d_mshr].event_cycle;
-// #ifdef BYPASS_LOGIC
+// #ifdef BYPASS_L1_LOGIC
 //             uint8_t  prior_bypassed = l1d->MSHR.entry[l1d_mshr].bypassed_levels;
 //             uint8_t prior_fill = l1d->MSHR.entry[l1d_mshr].fill_level;
 // #endif
@@ -824,14 +840,14 @@ void CACHE::handle_read() {
                         cout << "[" << NAME << "_RQ_PROCESSED] " << __func__ << " instr_id: " << RQ.entry[index].instr_id << " Read Hit ";
                         cout << hex << " read: " << RQ.entry[index].address << dec;
                         cout << " idx: " << MAX_READ;
-                        cout << " RQ ByP: " << (int) RQ.entry[index].bypassed_levels << " type: " << (int)RQ.entry[index].type  << endl; });
+                        cout << " RQ ByP: " << (int) RQ.entry[index].l1_bypassed << " type: " << (int)RQ.entry[index].type  << endl; });
                     } else {
                         cerr << "L1D PROCESSED FULL" << endl;
                         assert(0&&"RETURN IS LOST FOREVER!!!! ");
                     }
                 }
-#ifdef  BYPASS_LOGIC
-                else if ((cache_type == IS_L2C) && (RQ.entry[index].type == LOAD && RQ.entry[index].bypassed_levels == 1 && !RQ.entry[index].instruction)) {
+#ifdef  BYPASS_L1_LOGIC
+                else if ((cache_type == IS_L2C) && (RQ.entry[index].type == LOAD && RQ.entry[index].l1_bypassed == 1 && !RQ.entry[index].instruction)) {
                     if (PROCESSED.occupancy < PROCESSED.SIZE){
                         char* dst = (char*)&PROCESSED.entry[PROCESSED.tail];
                         for (size_t i = 0; i < sizeof(PACKET); i += 64) {
@@ -851,7 +867,7 @@ void CACHE::handle_read() {
                         dump_req(RQ.entry[index]);
                             // cout << hex << " read: " << RQ.entry[index].address << dec;
                         cout << " idx: " << MAX_READ;
-                        // cout << " RQ ByP: " << (int) RQ.entry[index].bypassed_levels << " type: " << (int)RQ.entry[index].type
+                        // cout << " RQ ByP: " << (int) RQ.entry[index].l1_bypassed << " type: " << (int)RQ.entry[index].type
                         cout << endl; });
                     } else {
                         cerr << "L2C PROCESSED FULL" << endl;
@@ -904,7 +920,7 @@ void CACHE::handle_read() {
                 HIT[RQ.entry[index].type]++;
                 ACCESS[RQ.entry[index].type]++;
 
-                if (RQ.entry[index].bypassed_levels != 0)
+                if (RQ.entry[index].l1_bypassed != 0)
                     total_ByP_cnt++;
 
                 // remove this entry from RQ
@@ -915,7 +931,7 @@ void CACHE::handle_read() {
                 uint8_t miss_handled = 1;
                 int mshr_index = check_mshr(&RQ.entry[index]);
                 #ifdef BYPASS_L1D_OnNewMiss
-                    if (cache_type == IS_L1D && RQ.entry[index].type == LOAD && mshr_index == -1 && lower_level->RQ.SIZE > lower_level->RQ.occupancy && shall_L1D_Bypass_OnCacheMissedMSHRcap(cpu, (CACHE*)this, (CACHE*)lower_level, (CACHE*)lower_level->lower_level) && warmup_complete[cpu]) {
+                    if (cache_type == IS_L1D && RQ.entry[index].type == LOAD && mshr_index == -1 && lower_level->RQ.SIZE > lower_level->RQ.occupancy && l1d_bypass_operate(cpu, (CACHE*)this, (CACHE*)lower_level, (CACHE*)lower_level->lower_level) && warmup_complete[cpu]) {
                         // if (warmup_complete[cpu]){
                             DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                                     cout << "[" << NAME << "_L1_ByP] " << __func__;
@@ -923,11 +939,28 @@ void CACHE::handle_read() {
                                     dump_req(RQ.entry[index]);
                                     cout << endl;
                                 };);
-                            RQ.entry[index].bypassed_levels = 1;
+                            RQ.entry[index].l1_bypassed = 1;
                             RQ.entry[index].fill_level = FILL_L2;
                             lower_level->add_rq(&RQ.entry[index]);
                         // }
-                    } else 
+                    } else
+                #endif
+                #ifdef BYPASS_LLC_LOGIC
+                if (cache_type == IS_LLC && RQ.entry[index].type == LOAD && mshr_index == -1
+                    && lower_level->RQ.SIZE > lower_level->RQ.occupancy
+                    && llc_bypass_operate(cpu, (CACHE*)lower_level->lower_level, (CACHE*)lower_level, (CACHE*)this)
+                    && warmup_complete[cpu]) {
+                        DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                                cout << "[" << NAME << "_LLC_ByP] " << __func__;
+                                cout << " ";
+                                dump_req(RQ.entry[index]);
+                                cout << endl;
+                            };);
+                        RQ.entry[index].llc_bypassed = 1;
+                        RQ.entry[index].fill_level = FILL_DRAM;
+                        total_LLC_ByP_cnt++;
+                        lower_level->add_rq(&RQ.entry[index]);
+                } else
                 #endif
                 if ((mshr_index == -1) && (MSHR.occupancy < MSHR_SIZE)) { // this is a new miss
                     if(cache_type == IS_LLC){
@@ -960,10 +993,10 @@ void CACHE::handle_read() {
                         // add it to mshr (read miss)
                             // it this is L2C and packet is bypass L1D we show details
 #ifdef BYPASS_DEBUG
-                            if (IS_L2C && RQ.entry[index].bypassed_levels == 1 && RQ.entry[index].type == LOAD) {
+                            if (IS_L2C && RQ.entry[index].l1_bypassed == 1 && RQ.entry[index].type == LOAD) {
                                 cout << " RQ miss will add to MSHR instr_ID: " << RQ.entry[index].instr_id << " addr: " << RQ.entry[index].address << endl;
                             }
-                            if (IS_L2C && RQ.entry[index].bypassed_levels == 1 && RQ.entry[index].type == LOAD && RQ.entry[index].instr_id == 2001730) {
+                            if (IS_L2C && RQ.entry[index].l1_bypassed == 1 && RQ.entry[index].type == LOAD && RQ.entry[index].instr_id == 2001730) {
                                 cout << " PROBLEM!!!! : " << RQ.entry[index].instr_id << " addr: " << RQ.entry[index].address << endl;
                             }
 #endif
@@ -999,11 +1032,11 @@ void CACHE::handle_read() {
                     }
                     else if (mshr_index != -1) { // already in-flight miss
 #ifdef BYPASS_DEBUG
-                        if (RQ.entry[index].bypassed_levels == 1 && RQ.entry[index].type != LOAD) {
+                        if (RQ.entry[index].l1_bypassed == 1 && RQ.entry[index].type != LOAD) {
                             cerr << NAME << " Type: " << RQ.entry[index].type << " addr: " << RQ.entry[index].address << "instrID: " << RQ.entry[index].instr_id << " ROB: " << RQ.entry[index].rob_index << endl;
                             assert(0&&"NOT EXPECTED NON LOAD BYPASS MERGE ... ");
                         }
-                        if (RQ.entry[index].bypassed_levels == 1 && RQ.entry[index].type == LOAD) {
+                        if (RQ.entry[index].l1_bypassed == 1 && RQ.entry[index].type == LOAD) {
                             cerr << NAME << " MERGING BYPASSED RQ into existing MSHR: " << NAME << RQ.entry[index].type << " addr: " << RQ.entry[index].address << "instrID: " << RQ.entry[index].instr_id << " ROB: " << RQ.entry[index].rob_index << endl;
                         }
 #endif
@@ -1017,7 +1050,7 @@ void CACHE::handle_read() {
                         };);
                         // mark merged consumer
                         if (RQ.entry[index].type == RFO) {
-                            if (RQ.entry[index].bypassed_levels)
+                            if (RQ.entry[index].l1_bypassed)
                                 assert(0&&"RFO BYPASS NOT EXPECTED ... ");
                             if (RQ.entry[index].tlb_access) {
                                 uint16_t sq_index = RQ.entry[index].sq_index;
@@ -1034,7 +1067,7 @@ void CACHE::handle_read() {
                         } else {
                             if (RQ.entry[index].instruction) {
 #ifdef BYPASS_DEBUG
-                                if (RQ.entry[index].bypassed_levels == 1) {
+                                if (RQ.entry[index].l1_bypassed == 1) {
                                     cerr << " THIS IS WRONG, WHY ByP INSTR??? " << NAME << RQ.entry[index].type << " addr: " << RQ.entry[index].address << "instrID: " << RQ.entry[index].instr_id << " ROB: " << RQ.entry[index].rob_index << endl;
                                 }
 #endif
@@ -1048,7 +1081,7 @@ void CACHE::handle_read() {
                                 }
                             } else {
 #ifdef BYPASS_DEBUG
-                                if (RQ.entry[index].bypassed_levels == 1) {
+                                if (RQ.entry[index].l1_bypassed == 1) {
                                     cout << " NOW ByP data RQ " << "LQ" << RQ.entry[index].lq_index << "SQ" << RQ.entry[index].sq_index<< "merging with MSHR " << NAME << RQ.entry[index].type << " addr: " << RQ.entry[index].address << "instrID: " << RQ.entry[index].instr_id << " ROB: " << RQ.entry[index].rob_index << endl;
                                 }
 #endif
@@ -1061,7 +1094,7 @@ void CACHE::handle_read() {
                                 MSHR.entry[mshr_index].lq_index_depend_on_me.join (RQ.entry[index].lq_index_depend_on_me, LQ_SIZE);
                                 if (RQ.entry[index].store_merged) {
 #ifdef BYPASS_DEBUG
-                                    if (RQ.entry[index].bypassed_levels == 1) {
+                                    if (RQ.entry[index].l1_bypassed == 1) {
                                         cout << " ByP HAS merged store " << NAME << RQ.entry[index].type << " addr: " << RQ.entry[index].address << "instrID: " << RQ.entry[index].instr_id << " ROB: " << RQ.entry[index].rob_index << endl;
                                     }
 #endif
@@ -1081,18 +1114,18 @@ void CACHE::handle_read() {
                         // update fill_level
                         if (RQ.entry[index].fill_level < MSHR.entry[mshr_index].fill_level) {
 #ifdef BYPASS_DEBUG
-                            if (RQ.entry[index].bypassed_levels == 1 || MSHR.entry[mshr_index].bypassed_levels == 1) {
+                            if (RQ.entry[index].l1_bypassed == 1 || MSHR.entry[mshr_index].l1_bypassed == 1) {
                                 cout << "Updating ByP fill lvl: " << "rq instrID: " << RQ.entry[index].instr_id << "RQ: " << RQ.entry[index].fill_level << " MSHR: " <<  MSHR.entry[mshr_index].fill_level << " Mtype: " << MSHR.entry[mshr_index].type << endl;
                             }
 #endif
                             MSHR.entry[mshr_index].fill_level = RQ.entry[index].fill_level;
 
                         }
-#ifdef BYPASS_LOGIC
+#ifdef BYPASS_L1_LOGIC
                         // Reset ByP if mismatch — non-bypass path will handle deps at fill time
                         if (cache_type == IS_L2C) {
-                            if (RQ.entry[index].bypassed_levels != MSHR.entry[mshr_index].bypassed_levels) {
-                                //  RQ.entry[index].bypassed_levels = 0;
+                            if (RQ.entry[index].l1_bypassed != MSHR.entry[mshr_index].l1_bypassed) {
+                                //  RQ.entry[index].l1_bypassed = 0;
                                 // MSHR.entry[mshr_index].fill_level = 1;
                                 if (MSHR.entry[mshr_index].type != PREFETCH) {
                                     // Push bypass LQ(s) directly to L1D MSHR
@@ -1125,13 +1158,13 @@ void CACHE::handle_read() {
                                             break;
                                         }
                                     }
-                                    RQ.entry[index].bypassed_levels = 0;
-                                    MSHR.entry[mshr_index].bypassed_levels = 0;
+                                    RQ.entry[index].l1_bypassed = 0;
+                                    MSHR.entry[mshr_index].l1_bypassed = 0;
                                     MSHR.entry[mshr_index].fill_level = 1;
                                 } else if (MSHR.entry[mshr_index].fill_level < fill_level) {
                                     // PREFETCH propagating to L1D → L1D has prefetch MSHR
                                     // Use normal return path, not bypass
-                                    RQ.entry[index].bypassed_levels = 0;
+                                    RQ.entry[index].l1_bypassed = 0;
                                 }
 
                                 // // === FIX: push bypass LQ deps into L1D MSHR now ===
@@ -1359,8 +1392,8 @@ void CACHE::handle_prefetch() {
                             if (MSHR.entry[mshr_index].type == PREFETCH) {
                                 MSHR.entry[mshr_index].fill_level = PQ.entry[index].fill_level;
                             }
-                    #ifdef BYPASS_LOGIC
-                        else if (MSHR.entry[mshr_index].bypassed_levels == 1) {
+                    #ifdef BYPASS_L1_LOGIC
+                        else if (MSHR.entry[mshr_index].l1_bypassed == 1) {
                             // PQ wants fill=1 but MSHR is bypass LOAD with no L1D MSHR.
                             // Downgrade fill_level so return_data reaches L1D,
                             // BUT only if L1D has an MSHR for this address (from prefetch).
@@ -1368,7 +1401,7 @@ void CACHE::handle_prefetch() {
                             if (l1d->probe_mshr(&PQ.entry[index]) != -1) {
                                 // L1D has MSHR (prefetch) — safe to redirect through L1D
                                 MSHR.entry[mshr_index].fill_level = PQ.entry[index].fill_level;
-                                MSHR.entry[mshr_index].bypassed_levels = 0;
+                                MSHR.entry[mshr_index].l1_bypassed = 0;
                             }
                             // else: no L1D MSHR — keep ByP=1, complete via L2C.PROCESSED
                         }
@@ -1448,12 +1481,22 @@ void CACHE::operate() {
         bool miss_active = (MSHR.occupancy > 0);
 #endif
 
-        /* ---- bypass detection (L2C only) ---- */
+        /* ---- bypass detection (L2C and LLC) ---- */
         bool has_byp = false;
-#ifdef BYPASS_LOGIC
+#ifdef BYPASS_L1_LOGIC
         if (cache_type == IS_L2C) {
             for (uint16_t i = 0; i < MSHR_SIZE; i++) {
-                if (MSHR.entry[i].address && MSHR.entry[i].bypassed_levels > 0) {
+                if (MSHR.entry[i].address && MSHR.entry[i].l1_bypassed > 0) {
+                    has_byp = true;
+                    break;
+                }
+            }
+        }
+#endif
+#ifdef BYPASS_LLC_LOGIC
+        if (cache_type == IS_LLC) {
+            for (uint16_t i = 0; i < MSHR_SIZE; i++) {
+                if (MSHR.entry[i].address && MSHR.entry[i].llc_bypassed > 0) {
                     has_byp = true;
                     break;
                 }
@@ -1606,13 +1649,13 @@ int CACHE::add_rq(PACKET *packet) {
 
 
 #ifdef BYPASS_DEBUG
-    if (packet->bypassed_levels == 1 && wq_index != -1) {
+    if (packet->l1_bypassed == 1 && wq_index != -1) {
         cout << " > add_rq(): ByP wq hit idx: " << wq_index << " instrID: " << packet->instr_id << " addr: " << packet->address << endl;
     }
 #endif
 
     if (wq_index != -1) {
-        if (WQ.entry[wq_index].bypassed_levels == 1 && packet->bypassed_levels == 0)
+        if (WQ.entry[wq_index].l1_bypassed == 1 && packet->l1_bypassed == 0)
             assert(0);
         // check fill level
         if (packet->fill_level < fill_level) {
@@ -1638,14 +1681,14 @@ int CACHE::add_rq(PACKET *packet) {
             cout << "[" << NAME << "_RQWQ_PROCESSED] " << __func__ << " instr_id: " << packet->instr_id << " found recent writebacks";
             cout << hex << " read: " << packet->address << " writeback: " << WQ.entry[wq_index].address << dec;
             cout << " idx: " << MAX_READ;
-            cout << " WQ ByP: " << (int) WQ.entry[wq_index].bypassed_levels << " type: " << (int) WQ.entry[wq_index].type << " Pack ByP: " << (int) packet->bypassed_levels << " type: " << packet->type  << endl; });
+            cout << " WQ ByP: " << (int) WQ.entry[wq_index].l1_bypassed << " type: " << (int) WQ.entry[wq_index].type << " Pack ByP: " << (int) packet->l1_bypassed << " type: " << packet->type  << endl; });
         }
 #ifdef BYPASS_SANITY_CHECK
         // if (packet->type != LOAD)
         //     assert(0&&" DID NOT EXPECT ADD RQ TO TAKE NON LOAD");
 #endif
-#ifdef BYPASS_LOGIC
-        if ((cache_type == IS_L2C) && (packet->type == LOAD) && packet->bypassed_levels == 1 && !packet->instruction) {
+#ifdef BYPASS_L1_LOGIC
+        if ((cache_type == IS_L2C) && (packet->type == LOAD) && packet->l1_bypassed == 1 && !packet->instruction) {
             if (PROCESSED.occupancy < PROCESSED.SIZE) {
 #ifdef BYPASS_DEBUG
 cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << " addr: " << packet->address << endl;
@@ -1656,7 +1699,7 @@ cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << 
             cout << "[" << NAME << "_RQWQ_ByP_PROCESSED] " << __func__ << " instr_id: " << packet->instr_id << " found recent writebacks";
             cout << hex << " read: " << packet->address << " writeback: " << WQ.entry[wq_index].address << dec;
             cout << " idx: " << MAX_READ;
-            cout << " WQ ByP: " << (int) WQ.entry[wq_index].bypassed_levels << " type: " << (int) WQ.entry[wq_index].type << " Pack ByP: " << (int) packet->bypassed_levels << " type: " << packet->type  << endl; });
+            cout << " WQ ByP: " << (int) WQ.entry[wq_index].l1_bypassed << " type: " << (int) WQ.entry[wq_index].type << " Pack ByP: " << (int) packet->l1_bypassed << " type: " << packet->type  << endl; });
         }
 #endif
         HIT[packet->type]++;
@@ -1673,10 +1716,10 @@ cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << 
     int index = RQ.check_queue(packet);
 #ifdef DEBUG_PRINT
     if (warmup_complete[cpu]) {
-        if (RQ.entry[index].bypassed_levels == 1 && packet->bypassed_levels == 0) {
-            cout << "[" << NAME << "] " << __func__ << " RQ instrID: " << RQ.entry[index].instr_id << " addr: " << RQ.entry[index].address << " ByP: " << (int)RQ.entry[index].bypassed_levels << " fill: "  << (int)RQ.entry[index].fill_level;
-            cout << " newIN pak: instrID: " << packet->instr_id << " addr: " << packet->address << " ByP: " << (int)packet->bypassed_levels << " fill: "  << (int)packet->fill_level;
-            // RQ.entry[index].bypassed_levels = 0;
+        if (RQ.entry[index].l1_bypassed == 1 && packet->l1_bypassed == 0) {
+            cout << "[" << NAME << "] " << __func__ << " RQ instrID: " << RQ.entry[index].instr_id << " addr: " << RQ.entry[index].address << " ByP: " << (int)RQ.entry[index].l1_bypassed << " fill: "  << (int)RQ.entry[index].fill_level;
+            cout << " newIN pak: instrID: " << packet->instr_id << " addr: " << packet->address << " ByP: " << (int)packet->l1_bypassed << " fill: "  << (int)packet->fill_level;
+            // RQ.entry[index].l1_bypassed = 0;
             cout << endl;
         }
     }
@@ -1696,11 +1739,20 @@ cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << 
                 RQ.entry[index].sq_index_depend_on_me.insert (sq_index);
                 RQ.entry[index].sq_index_depend_on_me.join(packet->sq_index_depend_on_me, SQ_SIZE);  // ← ADD
                 RQ.entry[index].store_merged = 1;
-#ifdef BYPASS_LOGIC
+#ifdef BYPASS_L1_LOGIC
                 if (cache_type == IS_L2C) {
-                    if (RQ.entry[index].bypassed_levels != packet->bypassed_levels) {
-                        RQ.entry[index].bypassed_levels = 0;
-                        // packet->bypassed_levels already 0 for RFO
+                    if (RQ.entry[index].l1_bypassed != packet->l1_bypassed) {
+                        RQ.entry[index].l1_bypassed = 0;
+                        // packet->l1_bypassed already 0 for RFO
+                        if (packet->fill_level < RQ.entry[index].fill_level)
+                            RQ.entry[index].fill_level = packet->fill_level;
+                    }
+                }
+#endif
+#ifdef BYPASS_LLC_LOGIC
+                if (cache_type == IS_LLC) {
+                    if (RQ.entry[index].llc_bypassed != packet->llc_bypassed) {
+                        RQ.entry[index].llc_bypassed = 0;
                         if (packet->fill_level < RQ.entry[index].fill_level)
                             RQ.entry[index].fill_level = packet->fill_level;
                     }
@@ -1710,8 +1762,8 @@ cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << 
                 cout << "[RFO_MERGED] " << __func__ << " cpu: " << (int) packet->cpu;
                 dump_req(packet);
                 dump_req(RQ.entry[index]);
-                // cout << hex << " Addr: " << packet->address << " FAddr: " << packet->full_addr << dec << " instr_id: " << packet->instr_id << " type:" << (int)packet->type << " rob: " << (int)packet->rob_index << " LQ: " << (int)packet->lq_index << " SQ: " << (int)packet->sq_index << " ByP: " << (int)packet->bypassed_levels ;
-                // cout << hex << " Addr: " << RQ.entry[index].address << " FAddr: " << RQ.entry[index].full_addr << dec << " instr_id: " << RQ.entry[index].instr_id << " type:" << (int)RQ.entry[index].type << " rob: " << (int)RQ.entry[index].rob_index << " LQ: " << (int)RQ.entry[index].lq_index << " SQ: " << (int)RQ.entry[index].sq_index << " ByP: " << (int)RQ.entry[index].bypassed_levels ;
+                // cout << hex << " Addr: " << packet->address << " FAddr: " << packet->full_addr << dec << " instr_id: " << packet->instr_id << " type:" << (int)packet->type << " rob: " << (int)packet->rob_index << " LQ: " << (int)packet->lq_index << " SQ: " << (int)packet->sq_index << " ByP: " << (int)packet->l1_bypassed ;
+                // cout << hex << " Addr: " << RQ.entry[index].address << " FAddr: " << RQ.entry[index].full_addr << dec << " instr_id: " << RQ.entry[index].instr_id << " type:" << (int)RQ.entry[index].type << " rob: " << (int)RQ.entry[index].rob_index << " LQ: " << (int)RQ.entry[index].lq_index << " SQ: " << (int)RQ.entry[index].sq_index << " ByP: " << (int)RQ.entry[index].l1_bypassed ;
                 cout <<  endl;});
 
             } 
@@ -1721,11 +1773,21 @@ cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << 
                 RQ.entry[index].lq_index_depend_on_me.insert(lq_index);
                 RQ.entry[index].lq_index_depend_on_me.join(packet->lq_index_depend_on_me, LQ_SIZE);  // ← ADD
                 RQ.entry[index].load_merged = 1;
-#ifdef BYPASS_LOGIC
+#ifdef BYPASS_LLC_LOGIC
+                if (cache_type == IS_LLC) {
+                    if (RQ.entry[index].llc_bypassed != packet->llc_bypassed) {
+                        RQ.entry[index].llc_bypassed = 0;
+                        packet->llc_bypassed = 0;
+                        if (packet->fill_level < RQ.entry[index].fill_level)
+                            RQ.entry[index].fill_level = packet->fill_level;
+                    }
+                }
+#endif
+#ifdef BYPASS_L1_LOGIC
                 if (cache_type == IS_L2C) {
-                    if (RQ.entry[index].bypassed_levels != packet->bypassed_levels) {
-                        RQ.entry[index].bypassed_levels = 0;
-                        packet->bypassed_levels = 0;
+                    if (RQ.entry[index].l1_bypassed != packet->l1_bypassed) {
+                        RQ.entry[index].l1_bypassed = 0;
+                        packet->l1_bypassed = 0;
                         if (packet->fill_level < RQ.entry[index].fill_level)
                             RQ.entry[index].fill_level = packet->fill_level;
                     }
@@ -1733,8 +1795,8 @@ cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << 
                     cout << "[ByP_DATA_MERGED] " << __func__ << " cpu: " << (int) packet->cpu;
                     dump_req(packet);
                     dump_req(RQ.entry[index]);
-                    // cout << hex << " Addr: " << packet->address << " FAddr: " << packet->full_addr << dec << " instr_id: " << packet->instr_id << " type:" << (int)packet->type << " rob: " << (int)packet->rob_index << " LQ: " << (int)packet->lq_index << " SQ: " << (int)packet->sq_index << " ByP: " << (int)packet->bypassed_levels ;
-                    // cout << hex << " Addr: " << RQ.entry[index].address << " FAddr: " << RQ.entry[index].full_addr << dec << " instr_id: " << RQ.entry[index].instr_id << " type:" << (int)RQ.entry[index].type << " rob: " << (int)RQ.entry[index].rob_index << " LQ: " << (int)RQ.entry[index].lq_index << " SQ: " << (int)RQ.entry[index].sq_index << " ByP: " << (int)RQ.entry[index].bypassed_levels ;
+                    // cout << hex << " Addr: " << packet->address << " FAddr: " << packet->full_addr << dec << " instr_id: " << packet->instr_id << " type:" << (int)packet->type << " rob: " << (int)packet->rob_index << " LQ: " << (int)packet->lq_index << " SQ: " << (int)packet->sq_index << " ByP: " << (int)packet->l1_bypassed ;
+                    // cout << hex << " Addr: " << RQ.entry[index].address << " FAddr: " << RQ.entry[index].full_addr << dec << " instr_id: " << RQ.entry[index].instr_id << " type:" << (int)RQ.entry[index].type << " rob: " << (int)RQ.entry[index].rob_index << " LQ: " << (int)RQ.entry[index].lq_index << " SQ: " << (int)RQ.entry[index].sq_index << " ByP: " << (int)RQ.entry[index].l1_bypassed ;
                     cout <<  endl;});
                 } else {
 #endif
@@ -1744,8 +1806,8 @@ cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << 
                         dump_req(packet);
                         cout << " RQ";
                         dump_req(RQ.entry[index]);
-                        // cout << hex << " Addr: " << packet->address << " FAddr: " << packet->full_addr << dec << " instr_id: " << packet->instr_id << " type:" << (int)packet->type << " rob: " << (int)packet->rob_index << " LQ: " << (int)packet->lq_index << " SQ: " << (int)packet->sq_index << " ByP: " << (int)packet->bypassed_levels ;
-                        // cout << hex << " Addr: " << RQ.entry[index].address << " FAddr: " << RQ.entry[index].full_addr << dec << " instr_id: " << RQ.entry[index].instr_id << " type:" << (int)RQ.entry[index].type << " rob: " << (int)RQ.entry[index].rob_index << " LQ: " << (int)RQ.entry[index].lq_index << " SQ: " << (int)RQ.entry[index].sq_index << " ByP: " << (int)RQ.entry[index].bypassed_levels ;
+                        // cout << hex << " Addr: " << packet->address << " FAddr: " << packet->full_addr << dec << " instr_id: " << packet->instr_id << " type:" << (int)packet->type << " rob: " << (int)packet->rob_index << " LQ: " << (int)packet->lq_index << " SQ: " << (int)packet->sq_index << " ByP: " << (int)packet->l1_bypassed ;
+                        // cout << hex << " Addr: " << RQ.entry[index].address << " FAddr: " << RQ.entry[index].full_addr << dec << " instr_id: " << RQ.entry[index].instr_id << " type:" << (int)RQ.entry[index].type << " rob: " << (int)RQ.entry[index].rob_index << " LQ: " << (int)RQ.entry[index].lq_index << " SQ: " << (int)RQ.entry[index].sq_index << " ByP: " << (int)RQ.entry[index].l1_bypassed ;
                         cout <<  endl;});
                 }
             }
@@ -1818,7 +1880,7 @@ int CACHE::add_wq(PACKET *packet) {
     // if there is no duplicate, add it to the write queue
     index = WQ.tail;
 #ifdef TRUE_SANITY_CHECK
-    if (WQ.entry[index].address != 0 || WQ.entry[index].bypassed_levels == 1) {
+    if (WQ.entry[index].address != 0 || WQ.entry[index].l1_bypassed == 1) {
         cerr << "[" << NAME << "_ERROR] " << __func__ << " is not empty idx: " << index;
         cerr << " addr: " << hex << WQ.entry[index].address;
         cerr << " full_addr: " << WQ.entry[index].full_addr << dec << endl;
@@ -1967,7 +2029,7 @@ void CACHE::return_data(PACKET *packet) {
 #endif
     int mshr_index = check_mshr(packet);
 #ifdef BYPASS_DEBUG
-    if (packet->bypassed_levels == 1)
+    if (packet->l1_bypassed == 1)
         cerr << "CATCH!!!! " << "MSHR: " << mshr_index << " instrID: " << packet->instr_id <<  endl;
 #endif
 
@@ -2003,7 +2065,7 @@ void CACHE::return_data(PACKET *packet) {
         MSHR.entry[mshr_index].event_cycle = current_core_cycle[packet->cpu] + LATENCY;
     else
         MSHR.entry[mshr_index].event_cycle += LATENCY;
-#ifdef BYPASS_LOGIC
+#ifdef BYPASS_L1_LOGIC
     // CASE: ONLY PREFETCH promotion — LOAD MSHR is handled at L2C mismatch time
     if (cache_type == IS_L1D && packet->type == LOAD && !packet->instruction
         && MSHR.entry[mshr_index].type == PREFETCH) {
@@ -2062,7 +2124,7 @@ void CACHE::return_data(PACKET *packet) {
 
 #endif
 //     // VB: ===== NEW: propagate bypass-accumulated deps from lower level =====
-// #ifdef BYPASS_LOGIC
+// #ifdef BYPASS_L1_LOGIC
 //     if (cache_type == IS_L1D) {
 //         if (packet->load_merged) {
 //             MSHR.entry[mshr_index].load_merged = 1;
@@ -2091,7 +2153,7 @@ void CACHE::return_data(PACKET *packet) {
     // cout << " data: " << MSHR.entry[mshr_index].data << dec << " num_returned: " << MSHR.num_returned;
     // cout << " idx: " << mshr_index << " occup: " << MSHR.occupancy;
     // cout << " event: " << MSHR.entry[mshr_index].event_cycle << " curr: " << current_core_cycle[packet->cpu] << " next: " << MSHR.next_fill_cycle;
-    // cout << " MSHR ByP: " << (int) MSHR.entry[mshr_index].bypassed_levels << " type: " << (int) MSHR.entry[mshr_index].type << " Pack ByP: " << (int) packet->bypassed_levels << " type: " << static_cast<int>(packet->type)
+    // cout << " MSHR ByP: " << (int) MSHR.entry[mshr_index].l1_bypassed << " type: " << (int) MSHR.entry[mshr_index].type << " Pack ByP: " << (int) packet->l1_bypassed << " type: " << static_cast<int>(packet->type)
     cout << endl; });
 }
 
@@ -2110,7 +2172,7 @@ void CACHE::update_fill_cycle() {
         // cout << " data: " << MSHR.entry[i].data << dec << " returned: " << +MSHR.entry[i].returned << " fill_level: " << (int) MSHR.entry[i].fill_level;
         // cout << " idx: " << i << " occup: " << MSHR.occupancy;
         // cout << " event: " << MSHR.entry[i].event_cycle << " curr: " << current_core_cycle[MSHR.entry[i].cpu] << " next: " << MSHR.next_fill_cycle;
-        // cout << " MSHR ByP: " << (int) MSHR.entry[i].bypassed_levels << " type: " << (int) MSHR.entry[i].type << endl; });
+        // cout << " MSHR ByP: " << (int) MSHR.entry[i].l1_bypassed << " type: " << (int) MSHR.entry[i].type << endl; });
     }
     MSHR.next_fill_cycle = min_cycle;
     MSHR.next_fill_index = min_index;
@@ -2120,7 +2182,7 @@ void CACHE::update_fill_cycle() {
         // cout << " addr: " << hex << MSHR.entry[min_index].address << " full_addr: " << MSHR.entry[min_index].full_addr;
         // cout << " data: " << MSHR.entry[min_index].data << dec << " num_returned: " << MSHR.num_returned;
         // cout << " event: " << MSHR.entry[min_index].event_cycle << " curr: " << current_core_cycle[MSHR.entry[min_index].cpu] << " next: " << MSHR.next_fill_cycle;
-        // cout << " MSHR ByP: " << (int) MSHR.entry[min_index].bypassed_levels << " type: " << (int) MSHR.entry[min_index].type  << endl; });
+        // cout << " MSHR ByP: " << (int) MSHR.entry[min_index].l1_bypassed << " type: " << (int) MSHR.entry[min_index].type  << endl; });
     }
 }
 
@@ -2135,15 +2197,21 @@ int CACHE::probe_mshr(PACKET *packet) {
 int CACHE::check_mshr(PACKET *packet) {
     // search mshr
     for (uint16_t index=0; index<MSHR_SIZE; index++) {
-#ifdef BYPASS_LOGIC_EQUIVALENCY_ON_ADDR_AND_BYPASS
-        if (MSHR.entry[index].address == packet->address && MSHR.entry[index].bypassed_levels == packet->bypassed_levels) {
+#ifdef BYPASS_L1_LOGIC_EQUIVALENCY_ON_ADDR_AND_BYPASS
+        if (MSHR.entry[index].address == packet->address && MSHR.entry[index].l1_bypassed == packet->l1_bypassed) {
 
 #else
         if (MSHR.entry[index].address == packet->address) { // FOR SPEED OF SIMS
 #endif
-#ifdef BYPASS_LOGIC
-            if (MSHR.entry[index].bypassed_levels == 1 && packet->bypassed_levels == 0 && packet->type == LOAD) {
-                MSHR.entry[index].bypassed_levels = 0;
+#ifdef BYPASS_L1_LOGIC
+            if (MSHR.entry[index].l1_bypassed == 1 && packet->l1_bypassed == 0 && packet->type == LOAD) {
+                MSHR.entry[index].l1_bypassed = 0;
+                MSHR.entry[index].fill_level = packet->fill_level;
+            }
+#endif
+#ifdef BYPASS_LLC_LOGIC
+            if (MSHR.entry[index].llc_bypassed == 1 && packet->llc_bypassed == 0 && packet->type == LOAD) {
+                MSHR.entry[index].llc_bypassed = 0;
                 MSHR.entry[index].fill_level = packet->fill_level;
             }
 #endif
@@ -2153,9 +2221,9 @@ int CACHE::check_mshr(PACKET *packet) {
             cout << " MSHR";
             dump_req(MSHR.entry[index]);
             //                                                 "new instr_id: " << packet->instr_id << " existing_id: " << MSHR.entry[index].instr_id;
-            // cout << " mFill: " << (int)MSHR.entry[index].fill_level << " mByP: " << (int)(MSHR.entry[index].bypassed_levels) << " type: " << (int) MSHR.entry[index].type;
+            // cout << " mFill: " << (int)MSHR.entry[index].fill_level << " mByP: " << (int)(MSHR.entry[index].l1_bypassed) << " type: " << (int) MSHR.entry[index].type;
             // cout << " paddr: " << hex << packet->address;
-            // cout << " pfull_addr: " << packet->full_addr << dec << " ByP: " << (int) packet->bypassed_levels <<   " type: " << (int) packet->type
+            // cout << " pfull_addr: " << packet->full_addr << dec << " ByP: " << (int) packet->l1_bypassed <<   " type: " << (int) packet->type
             cout << endl; });
             return index;
         }
@@ -2196,7 +2264,7 @@ inline void CACHE::add_mshr(PACKET *packet) {
             break;
         }
 #ifdef BYPASS_DEBUG
-        if (MSHR.entry[index].event_cycle+10000  < current_core_cycle[packet->cpu]&& MSHR.entry[index].bypassed_levels == 1) {
+        if (MSHR.entry[index].event_cycle+10000  < current_core_cycle[packet->cpu]&& MSHR.entry[index].l1_bypassed == 1) {
             cout << " MSHR IS NOT RESOLVED FOR BYPASS lvl: " << NAME << " addr: " <<  MSHR.entry[index].address << " instrID: " << MSHR.entry[index].instr_id << endl; 
         }
 #endif

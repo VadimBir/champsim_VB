@@ -1440,21 +1440,21 @@ int O3_CPU::execute_load(const uint16_t rob_index, const uint32_t lq_index, cons
     cout << " Before execLoad LQ: " << lq_index << "instrID: " << data_packet.instr_id << " rob: " << rob_index << " addr:" << data_packet.address << endl;
 #endif
 
-#ifdef BYPASS_LOGIC
+#ifdef BYPASS_L1_LOGIC
     // if (L1D.MSHR.occupancy >= L1D_MSHR_SIZE)
-    //     L2C.BYPASS_L1D_Cache = true;
+    //     (L2C.is_bypassing & BYP_L1_BIT) = true;
     // else
-    //     L2C.BYPASS_L1D_Cache = false;
+    //     (L2C.is_bypassing & BYP_L1_BIT) = false;
     // #ifdef BYPASS_L1D_OnNewMiss
     // int isMiss = L1D.check_hit(&data_packet) < 0;
     // int mshr_idx = L1D.probe_mshr(&data_packet);
     // if (isMiss && L1D.probe_mshr(&data_packet) != -1 && shall_L1D_Bypass_OnCacheMissedMSHRcap(L1D, L2C)) {
-    //     data_packet.bypassed_levels = 1;
+    //     data_packet.l1_bypassed = 1;
     //     data_packet.fill_level = FILL_L2;
     //     rq_index = L2C.add_rq(&data_packet);
     // } else 
     // #endif
-    if (!L2C.BYPASS_L1D_Cache) {
+    if (!(L2C.is_bypassing & BYP_L1_BIT)) {
 #ifdef BYPASS_DEBUG
         cout << __func__ << " addL1D RQ ... " << endl;
 #endif
@@ -1464,11 +1464,11 @@ int O3_CPU::execute_load(const uint16_t rob_index, const uint32_t lq_index, cons
     } else {
         #ifdef BYPASS_L1D_OnNewMiss
         // SANITY CHECK 
-        if (L2C.BYPASS_L1D_Cache == true){
+        if ((L2C.is_bypassing & BYP_L1_BIT)){
             assert(0&&"BOTH L2 PREFETCHER TRIGGER BYPASS + CACHE LEVEL L1D RQ BASED BYPASS ARE ACTIVE");
         }
         #endif 
-        if (L2C.BYPASS_L1D_Cache) {
+        if ((L2C.is_bypassing & BYP_L1_BIT)) {
 #ifdef BYPASS_DEBUG
             cout << __func__ << " " << __LINE__ << " ooo.L2C" << " &" << this << " L2C ByP Entry: instrID: " << data_packet.instr_id << " address: " << data_packet.address << " rob: " << data_packet.rob_index << endl ;
             if (data_packet.instr_id == 14612) {
@@ -1476,7 +1476,7 @@ int O3_CPU::execute_load(const uint16_t rob_index, const uint32_t lq_index, cons
             }
 #endif
             if (warmup_complete[cpu]){
-                data_packet.bypassed_levels = 1;
+                data_packet.l1_bypassed = 1;
                 data_packet.fill_level = FILL_L2;
                 rq_index = L2C.add_rq(&data_packet);
             }
@@ -1579,12 +1579,12 @@ void O3_CPU::update_rob()
 
     if (L1D.PROCESSED.occupancy && (L1D.PROCESSED.entry[L1D.PROCESSED.head].event_cycle <= current_core_cycle[cpu]))
         complete_data_fetch(&L1D.PROCESSED, 0);
-#ifdef BYPASS_LOGIC
+#ifdef BYPASS_L1_LOGIC
     if (L2C.PROCESSED.occupancy && (L2C.PROCESSED.entry[L2C.PROCESSED.head].event_cycle <= current_core_cycle[cpu])) {
         // cout << " \n L2C: updateROB complete_data_fetch " << " instrID: " << L2C.PROCESSED.entry[L2C.PROCESSED.head].instr_id << " addr: " << L2C.PROCESSED.entry[L2C.PROCESSED.head].address << " cy:" << L2C.PROCESSED.entry[L2C.PROCESSED.head].event_cycle << endl;
-        // cerr << " updateROB() L2C: " <<  (int) L2C.PROCESSED.entry[L2C.PROCESSED.head].bypassed_levels << endl;
+        // cerr << " updateROB() L2C: " <<  (int) L2C.PROCESSED.entry[L2C.PROCESSED.head].l1_bypassed << "/" << (int) L2C.PROCESSED.entry[L2C.PROCESSED.head].l2_bypassed << "/" << (int) L2C.PROCESSED.entry[L2C.PROCESSED.head].llc_bypassed << endl;
 #ifdef BYPASS_SANITY_CHECK
-        if (!L2C.PROCESSED.entry[L2C.PROCESSED.head].bypassed_levels) {
+        if (!L2C.PROCESSED.entry[L2C.PROCESSED.head].l1_bypassed && !L2C.PROCESSED.entry[L2C.PROCESSED.head].l2_bypassed) {
             cerr << "ooo_instrID: " << L2C.PROCESSED.entry[L2C.PROCESSED.head].instr_id << " addr: " << L2C.PROCESSED.entry[L2C.PROCESSED.head].address << " type: " << L2C.PROCESSED.entry[L2C.PROCESSED.head].type << endl;
             assert(0&&"Why L2 COMPLETES NON BYPASS???? ");
         }
@@ -1719,7 +1719,7 @@ void O3_CPU::complete_data_fetch(PACKET_QUEUE *queue, uint8_t is_it_tlb)
     }
     else { // L1D or ByP L2C
 #ifdef BYPASS_DEBUG
-        if (queue->entry[index].bypassed_levels == 1 && (queue->entry[index].type != LOAD)) {
+        if (queue->entry[index].l1_bypassed && (queue->entry[index].type != LOAD)) {
             cerr << "  WOW, WHY complete data fetch ByP is NOT LOAD?????" << endl;
         }
 #endif
@@ -1741,7 +1741,7 @@ void O3_CPU::complete_data_fetch(PACKET_QUEUE *queue, uint8_t is_it_tlb)
 #ifdef TRUE_SANITY_CHECK
             if (ROB.entry[rob_index]->num_mem_ops < 0) {
                 cerr << "#memOp: " << ROB.entry[rob_index]->num_mem_ops << "load merged: " << (int) queue->entry[index].load_merged << " store merged: " << (int) queue->entry[index].store_merged << endl;
-                cerr << "instr_id: " << ROB.entry[rob_index]->instr_id << " isByP? " << (int) queue->entry[index].bypassed_levels << endl;
+                cerr << "instr_id: " << ROB.entry[rob_index]->instr_id << " isByP? " << (int) queue->entry[index].l1_bypassed << "/" << (int) queue->entry[index].l2_bypassed << "/" << (int) queue->entry[index].llc_bypassed << endl;
                 assert(0);
             }
 #endif

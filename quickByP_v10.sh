@@ -38,7 +38,7 @@ done
 # Edit THIS SAME SCRIPT while it runs, save it, and new value
 # will be used by wait_for_slot().
 # =========================================================
-MAX_CONCURRENT_PROCS=7
+MAX_CONCURRENT_PROCS=6
 
 # Poll interval for slot checking / stale temp cleanup
 POLL_SEC=7
@@ -84,8 +84,12 @@ DO_MIN_SIM=0
 FAST_WARMUP=500000
 FAST_SIM=3000000
 
+# L2/LLC bypass toggle (0=off, 1=on)
+BYPASS_L2=${BYPASS_L2:-0}
+BYPASS_LLC=${BYPASS_LLC:-0}
+
 # CORE_LIST=(16 1 2  8 4)
-CORE_LIST=(2)
+CORE_LIST=(16 8 4 2 1)
 
 TRACE_LIST=(
   "LLM256.Pythia-70M_21M"
@@ -96,16 +100,21 @@ TRACE_LIST=(
 # or
 #   "L1 L2 L3"
 PREFETCH_LIST=(
-#   "next_line-1-2-4 next_line"
+  "next_line-1-2-4 next_line"
   "no no"
-#   "next_line ip_stride"
-#   "next_line no"
-#   "no next_line"
+  "next_line ip_stride"
+  "next_line no"
+  "no next_line"
 )
 
 LLC_PREFETCHER_DEFAULT="no"
 
 MODEL_LIST=(
+# "ByP_w_capacityDemandProjection_3_derived.bypass"
+# "ByP_w_capacityDemandProjection_4_paperish.bypass"
+# "no.bypass"
+# "ByP_w_capacityDemandProjection_5_Two_sided.bypass"
+"ByP_w_capacityDemandProjection_3_derived"
 # "ByP_capacityDemandProjection_2.bypass"
 # "ByP_w_capacityDemandProjection_2.bypass"
 
@@ -128,7 +137,6 @@ MODEL_LIST=(
 # "ByP_rqOccupancyLpmGated.bypass"
 # "ByP_trigger30.bypass"
 # "ByP_windowBudgetModel.bypass"
-"no.bypass"
 
 # "B001_trigger_30pct.bypass"
 # "B002_trigger_40pct.bypass"
@@ -632,17 +640,17 @@ append_failed_row() {
 
 resolve_model_file() {
     local model="$1"
+    local ext="${2:-.l1_bypass}"
     local normalized
     local found
 
-    if [[ "$model" == *.bypass ]]; then
+    if [[ "$model" == *"$ext" ]]; then
         normalized="$model"
     else
-        normalized="${model}.bypass"
+        normalized="${model}${ext}"
     fi
 
     found="$(find "$CHAMPSIM_DIR/src/ByP_Models" -type f -name "$normalized" -print -quit 2>/dev/null || true)"
-    # echo 
     [[ -n "$found" ]] || return 1
     echo "$found"
 }
@@ -660,11 +668,15 @@ build_binary_for_cfg() {
   local core_uarch="${arch_base}_${cores}c"
   local build_key builddir rc=0
 
-  local model_src="$(resolve_model_file "$model_file")" || {
-        echo "[ERROR] missing bypass model via find: $model_file" >> "$logfile"
+  local model_src="$(resolve_model_file "$model_file" ".l1_bypass")" || {
+        echo "[ERROR] missing L1 bypass model via find: $model_file" >> "$logfile"
         return 207
     }
-  echo "[MODEL PATH] $model_file" >> "$logfile"
+  local l2_model_src="$(resolve_model_file "$model_file" ".l2_bypass")" || {
+        echo "[WARN] no L2 bypass model for: $model_file (using fallback)" >> "$logfile"
+        l2_model_src=""
+    }
+  echo "[MODEL PATH] L1=$model_file L2=${l2_model_src:-fallback}" >> "$logfile"
   local arch_src="$CHAMPSIM_DIR/inc/Arch/${core_uarch}.h"
   local branch_src="$CHAMPSIM_DIR/branch/${BRANCH}.bpred"
   local l1_src="$CHAMPSIM_DIR/prefetcher/${l1_pf}.l1d_pref"
@@ -679,7 +691,7 @@ build_binary_for_cfg() {
   [[ -f "$l2_src"    ]] || { echo "[ERROR] missing L2 prefetcher: $l2_src" >> "$logfile"; return 204; }
   [[ -f "$l3_src"    ]] || { echo "[ERROR] missing LLC prefetcher: $l3_src" >> "$logfile"; return 205; }
   [[ -f "$repl_src"  ]] || { echo "[ERROR] missing replacement policy: $repl_src" >> "$logfile"; return 206; }
-  [[ -f "$model_src" ]] || { echo "[ERROR] missing bypass model: $model_src" >> "$logfile"; return 207; }
+  [[ -f "$model_src" ]] || { echo "[ERROR] missing L1 bypass model: $model_src" >> "$logfile"; return 207; }
   [[ -f "$pgo_src"   ]] || { echo "[ERROR] missing PGO file: $pgo_src" >> "$logfile"; return 208; }
 
   wait_for_work_space
@@ -708,11 +720,28 @@ build_binary_for_cfg() {
   cp "$l2_src"     "$builddir/prefetcher/l2c_prefetcher.cc"   || { rm -f "${builddir}/.active_build"; return 213; }
   cp "$l3_src"     "$builddir/prefetcher/llc_prefetcher.cc"   || { rm -f "${builddir}/.active_build"; return 214; }
   cp "$repl_src"   "$builddir/replacement/llc_replacement.cc" || { rm -f "${builddir}/.active_build"; return 215; }
-  cp "$model_src"  "$builddir/src/ooo_ByP_Model.cc"           || { rm -f "${builddir}/.active_build"; return 216; }
+  cp "$model_src"  "$builddir/src/ooo_l1_byp_model.cc"        || { rm -f "${builddir}/.active_build"; return 216; }
+  if [[ -n "$l2_model_src" ]]; then
+    cp "$l2_model_src" "$builddir/src/ooo_l2_byp_model.cc"   || { rm -f "${builddir}/.active_build"; return 219; }
+  fi
 
   sed -i.bak "s/^#define NUM_CPUS [0-9][0-9]*/#define NUM_CPUS ${cores}/" "$builddir/inc/champsim.h" || { rm -f "${builddir}/.active_build"; return 217; }
 
-  echo "[BUILD] Loaded bypass model: ${model_file}" >> "$logfile"
+  # Toggle L2 bypass
+  if (( BYPASS_L2 == 1 )); then
+    sed -i 's|^[[:space:]]*//[[:space:]]*#define BYPASS_L2_LOGIC|#define BYPASS_L2_LOGIC|' "$builddir/inc/champsim.h"
+  else
+    sed -i 's|^[[:space:]]*#define BYPASS_L2_LOGIC|// #define BYPASS_L2_LOGIC|' "$builddir/inc/champsim.h"
+  fi
+
+  # Toggle LLC bypass
+  if (( BYPASS_LLC == 1 )); then
+    sed -i 's|^[[:space:]]*//[[:space:]]*#define BYPASS_LLC_LOGIC|#define BYPASS_LLC_LOGIC|' "$builddir/inc/champsim.h"
+  else
+    sed -i 's|^[[:space:]]*#define BYPASS_LLC_LOGIC|// #define BYPASS_LLC_LOGIC|' "$builddir/inc/champsim.h"
+  fi
+
+  echo "[BUILD] Loaded bypass model: ${model_file} L2byp=${BYPASS_L2} L3byp=${BYPASS_LLC}" >> "$logfile"
 
     if [ "$DEBUG_LEVEL" -eq 2 ]; then
     (
@@ -928,10 +957,10 @@ done
 echo "TOTAL RUNS: $totRunCnt"
 
 currRunCnt=0
-for cores in "${CORE_LIST[@]}"; do
   for model_name in "${MODEL_LIST[@]}"; do
     for trace in "${TRACE_LIST[@]}"; do
       for pf_spec in "${PREFETCH_LIST[@]}"; do
+for cores in "${CORE_LIST[@]}"; do
         ((currRunCnt++))
 
         read -r l1_pf l2_pf l3_pf <<< "$pf_spec"

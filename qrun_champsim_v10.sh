@@ -15,8 +15,8 @@ PfBuilder=qbuildPrefetcher_v10
 PfRunner=qrun_champsim_v10
 
 
-FAST_WARMUP=500000
-FAST_SIM=1000000
+FAST_WARMUP=5000000
+FAST_SIM=11000000
 
 # Require 1 argument from user
 if [ $# -ne 1 ] && [ $# -ne 4 ] && [ $# -ne 5 ]; then

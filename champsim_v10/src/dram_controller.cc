@@ -371,9 +371,12 @@ void MEMORY_CONTROLLER::process(PACKET_QUEUE *queue)
                 // cout << " current_cycle: " << current_core_cycle[op_cpu] << " event_cycle: " << queue->entry[request_index].event_cycle << endl; });
 
                 // send data back to the core cache hierarchy
-
-
-
+#ifdef BYPASS_LLC_LOGIC
+                if (queue->entry[request_index].llc_bypassed) {
+                    // LLC was bypassed: skip LLC->return_data(), call LLC's upper (L2C) directly
+                    upper_level_dcache[op_cpu]->upper_level_dcache[op_cpu]->return_data(&queue->entry[request_index]);
+                } else
+#endif
                 upper_level_dcache[op_cpu]->return_data(&queue->entry[request_index]);
 
                 if (bank_request[op_channel][op_rank][op_bank].row_buffer_hit)
@@ -465,10 +468,16 @@ int MEMORY_CONTROLLER::add_rq(PACKET *packet)
 
     // simply return read requests with dummy response before the warmup
     if (all_warmup_complete < NUM_CPUS) {
-        if (packet->instruction) 
+        if (packet->instruction)
             upper_level_icache[packet->cpu]->return_data(packet);
-        else // data
+        else {
+#ifdef BYPASS_LLC_LOGIC
+            if (packet->llc_bypassed)
+                upper_level_dcache[packet->cpu]->upper_level_dcache[packet->cpu]->return_data(packet);
+            else
+#endif
             upper_level_dcache[packet->cpu]->return_data(packet);
+        }
 
         return -1;
     }
@@ -478,15 +487,21 @@ int MEMORY_CONTROLLER::add_rq(PACKET *packet)
     int wq_index = check_dram_queue(&WQ[channel], packet);
 
     if (wq_index != -1) {
-        
+
         // no need to check fill level
         //if (packet->fill_level < fill_level) {
 
             packet->data = WQ[channel].entry[wq_index].data;
-            if (packet->instruction) 
+            if (packet->instruction)
                 upper_level_icache[packet->cpu]->return_data(packet);
-            else // data
+            else {
+#ifdef BYPASS_LLC_LOGIC
+                if (packet->llc_bypassed)
+                    upper_level_dcache[packet->cpu]->upper_level_dcache[packet->cpu]->return_data(packet);
+                else
+#endif
                 upper_level_dcache[packet->cpu]->return_data(packet);
+            }
         //}
 
         // DP ( if (packet->cpu) {

@@ -93,9 +93,9 @@ uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache
             ((MSHR.SIZE - MSHR.occupancy) -
             (L2_RQ_PQ_occu * L2_miss_rate)) > 0) {
 
-            BYPASS_L1D_Cache = true;
+            is_bypassing |= BYP_L1_BIT;
         } else {
-            BYPASS_L1D_Cache = false;
+            is_bypassing &= ~BYP_L1_BIT;
         }
         
         // if (l1d->MSHR.occupancy <= L1D_MSHR_release_limit)
@@ -107,7 +107,7 @@ uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache
     dbg_op_count++;
     dbg_l2_total++;
     if (cache_hit) dbg_l2_hits++;
-    if (BYPASS_L1D_Cache) dbg_byp_on++;
+    if (is_bypassing & BYP_L1_BIT) dbg_byp_on++;
     else dbg_byp_off++;
 
     // Print every 8192 operate calls (tunable via mask)
@@ -123,7 +123,7 @@ uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache
             << " L2PQ:"   << setw(2)  << l2c_pq
 
             << COLOR_LIGHT_YELLOW
-            << " 2ByP1:"    << setw(1)  << BYPASS_L1D_Cache
+            << " 2ByP1:"    << setw(1)  << is_bypassing
             << " LPM2:"   << setw(3)  << (l2c_lpm_ewma >> 8)
             << " MLP2:"   << setw(3)  << (mlp_sample_n ? mlp_sample_sum/mlp_sample_n : 0)
 

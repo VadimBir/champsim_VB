@@ -24,7 +24,9 @@ public:
         prefetch : 2,
         dirty : 2,
         used : 2;
-    uint8_t bypassed_levels;
+    uint8_t l1_bypassed;
+    uint8_t l2_bypassed;
+    uint8_t llc_bypassed;
     // int delta,
     //     depth,
     //     signature,
@@ -51,6 +53,10 @@ public:
         // depth = 0;
         // signature = 0;
         // confidence = 0;
+
+        l1_bypassed = 0;
+        l2_bypassed = 0;
+        llc_bypassed = 0;
 
         address = 0;
         full_addr = 0;
@@ -110,7 +116,9 @@ public:
     uint64_t instruction_pa, data_pa, data, instr_id, ip, event_cycle, cycle_enqueued;
 
 
-    uint8_t bypassed_levels = 0;
+    uint8_t l1_bypassed = 0;
+    uint8_t l2_bypassed = 0;
+    uint8_t llc_bypassed = 0;
     uint8_t exist_lvls = 0;
 
     int pf_origin_level : 4, rob_index : 12;
@@ -221,7 +229,9 @@ public:
         fast_copy_fastset(dest.sq_index_depend_on_me, src.sq_index_depend_on_me);
         dest.address = src.address;
         dest.full_addr = src.full_addr;
-        dest.bypassed_levels = src.bypassed_levels;
+        dest.l1_bypassed = src.l1_bypassed;
+        dest.l2_bypassed = src.l2_bypassed;
+        dest.llc_bypassed = src.llc_bypassed;
         dest.fill_level = src.fill_level;
 
 
@@ -251,7 +261,9 @@ public:
         fill_level = rob_index = -1;
         pf_metadata = 0;
         // VB: used for bypass cache level
-        bypassed_levels = 0;
+        l1_bypassed = 0;
+        l2_bypassed = 0;
+        llc_bypassed = 0;
         exist_lvls = 0;
 
         rob_index_depend_on_me.clear();
@@ -289,7 +301,7 @@ public:
     //         << " SQ "      << (int)p.sq_index
     //         << " fill "    << (int)p.fill_level
     //         << " addr "    << (uint64_t)p.address      // DECIMAL, NOT HEX
-    //         << " ByP "     << (int)p.bypassed_levels
+    //         << " ByP "     << (int)p.l1_bypassed << "/" << (int)p.l2_bypassed << "/" << (int)p.llc_bypassed
     //         << " type "    << (int)p.type
     //         << " ret "     << (int)p.returned
     //         << " currCy "  << (uint64_t)current_cycle[p.cpu];
@@ -345,7 +357,7 @@ public:
     //         (int)lq_index,
     //         (int)sq_index,
     //         (int)fill_level,
-    //         (int)bypassed_levels,
+    //         (int)l1_bypassed, (int)l2_bypassed, (int)llc_bypassed,
     //         (int)type,
     //         (int)returned
     //     );
@@ -381,7 +393,7 @@ public:
     //         (int)lq_index,
     //         (int)sq_index,
     //         (int)fill_level,
-    //         (int)bypassed_levels,
+    //         (int)l1_bypassed, (int)l2_bypassed, (int)llc_bypassed,
     //         (int)type,
     //         (int)returned
     //     );
@@ -402,7 +414,7 @@ inline std::ostream& operator<<(std::ostream& os, const PACKET& p)
         << " SQ "      << (int)p.sq_index
         << " fill "    << (int)p.fill_level
         << " addr "    << (uint64_t)p.address
-        << " ByP "     << (int)p.bypassed_levels
+        << " ByP "     << (int)p.l1_bypassed << "/" << (int)p.l2_bypassed << "/" << (int)p.llc_bypassed
         << " type "    << (int)p.type
         << " ret "     << (int)p.returned;
         // << " currCy "  << (uint64_t)current_cycle[p.cpu];
