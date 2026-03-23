@@ -17,13 +17,13 @@
 
 
 // #define PRINT_STATS_EVERY 1000000
-#define PRINT_STATS_EVERY 1000000
+#define PRINT_STATS_EVERY 100000
 #ifdef CRC2_COMPILE
 #define STAT_PRINTING_PERIOD PRINT_STATS_EVERY // print stats every X instructions
 #else
 #define STAT_PRINTING_PERIOD PRINT_STATS_EVERY // print stats every X instructions
 #endif
-#define DEADLOCK_CYCLE 100000
+#define DEADLOCK_CYCLE 10000000
 
 #define PROBLEM_INSTR_ID 1074715
 

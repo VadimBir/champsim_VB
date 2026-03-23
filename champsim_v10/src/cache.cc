@@ -1,7 +1,9 @@
 #include "cache.h"
 #include "set.h"
 #include "ooo_l1_byp_model.cc"
-// #include "ooo_l2_byp_model.cc"
+#ifdef BYPASS_L2_LOGIC
+#include "ooo_l2_byp_model.cc"
+#endif
 #ifdef BYPASS_LLC_LOGIC
 #include "ooo_llc_byp_model.cc"
 #endif
@@ -249,7 +251,7 @@ void CACHE::handle_fill() {
                     lower_level->increment_WQ_FULL(block[set][way].address);
                     STALL[MSHR.entry[mshr_index].type]++;
 
-                    // DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[fill_cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                    // DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[fill_cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                     // cout << "[" << NAME << "] " << __func__ << "do_fill: " << +do_fill;
                     // cout << " lower level wq is full!" << " fill_addr: " << hex << MSHR.entry[mshr_index].address;
                     // cout << " victim_addr: " << block[set][way].tag << dec << endl; });
@@ -364,7 +366,7 @@ void CACHE::handle_fill() {
             //else if (cache_type == IS_L1D) {
             else if ((cache_type == IS_L1D) && (MSHR.entry[mshr_index].type != PREFETCH)) {
                 if (PROCESSED.occupancy < PROCESSED.SIZE){
-                    DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[MSHR.entry[mshr_index].cpu]) {
+                    DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[MSHR.entry[mshr_index].cpu]) {
                         // print: instr, hex addr, hex full addr, MSHR, occupancy, event cy, curr cy, MSHR ByP, (int) type, (int) fill lvl,
                         cout << "[" << NAME << "_FILL_PROCESSED] " << __func__ << " L1D add processed instrID: " <<  MSHR.entry[mshr_index].instr_id;
                         cout << " addr: " <<  hex << MSHR.entry[mshr_index].address << " full_addr: " << MSHR.entry[mshr_index].full_addr << dec;
@@ -385,7 +387,7 @@ void CACHE::handle_fill() {
                     cout << " L2C ByP complete? " << (int) MSHR.entry[mshr_index].l1_bypassed << endl;
                     cout << " L2C IS completing some packets: " << " instrID: " <<  MSHR.entry[mshr_index].instr_id  << " rob: " <<  MSHR.entry[mshr_index].rob_index << " addr: " <<  MSHR.entry[mshr_index].address << endl;
 #endif
-                    DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[MSHR.entry[mshr_index].cpu]) {
+                    DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[MSHR.entry[mshr_index].cpu]) {
                         // print: instr, hex addr, hex full addr, MSHR, occupancy, event cy, curr cy, MSHR ByP, (int) type, (int) fill lvl,
                         cout << "[" << NAME << "_FILL_ByP_PROCESSED] " << __func__ << " L2C=>L1D add processed instrID: " <<  MSHR.entry[mshr_index].instr_id;
                         cout << " addr: " <<  hex << MSHR.entry[mshr_index].address << " full_addr: " << MSHR.entry[mshr_index].full_addr << dec;
@@ -461,6 +463,23 @@ void CACHE::handle_fill() {
                 }
             }
 #endif
+#ifdef BYPASS_L2_LOGIC
+            else if ((cache_type == IS_LLC) && (MSHR.entry[mshr_index].type == LOAD) && MSHR.entry[mshr_index].l2_bypassed == 1 ) {
+                // if (PROCESSED.occupancy < PROCESSED.SIZE){
+                    DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[MSHR.entry[mshr_index].cpu]) {
+                        cout << "[" << NAME << "_FILL_ByP_ret] " << __func__ << " LLC=>L1D return instrID: " <<  MSHR.entry[mshr_index].instr_id;
+                        cout << " addr: " <<  hex << MSHR.entry[mshr_index].address << " full_addr: " << MSHR.entry[mshr_index].full_addr << dec;
+                        cout << " occupancy: " << (int)MSHR.occupancy << " event cy: " << MSHR.entry[mshr_index].event_cycle << " curr cy: " << current_core_cycle[cpu];
+                        cout << " BYP: " << (int)MSHR.entry[mshr_index].l2_bypassed << " type: " << (int)MSHR.entry[mshr_index].type << " fill lvl: " << (int)MSHR.entry[mshr_index].fill_level;
+                        cout << endl;
+                    });
+                    upper_level_dcache[fill_cpu]->upper_level_dcache[fill_cpu]->return_data(&MSHR.entry[mshr_index]);
+                // } else {
+                    // cerr << "LLC PROCESSED FULL (L2 ByP)" << endl;
+                    // assert(0&&"RETURN IS LOST FOREVER!!!! ");
+                // }
+            }
+#endif
 
 	        if(warmup_complete[fill_cpu]){
 		        uint64_t current_miss_latency = (current_core_cycle[fill_cpu] - MSHR.entry[mshr_index].cycle_enqueued);
@@ -488,6 +507,9 @@ inline void CACHE::merge_with_prefetch(PACKET &mshr_packet, PACKET &queue_packet
     uint8_t prior_fill = mshr_packet.fill_level;
     uint8_t prior_l1_bypassed = mshr_packet.l1_bypassed;
 #endif
+#ifdef BYPASS_L2_LOGIC
+    uint8_t prior_l2_bypassed = mshr_packet.l2_bypassed;
+#endif
 #ifdef BYPASS_LLC_LOGIC
     uint8_t prior_llc_bypassed = mshr_packet.llc_bypassed;
 #endif
@@ -504,6 +526,9 @@ inline void CACHE::merge_with_prefetch(PACKET &mshr_packet, PACKET &queue_packet
 #ifdef BYPASS_L1_LOGIC
     mshr_packet.fill_level = prior_fill;
     mshr_packet.l1_bypassed = prior_l1_bypassed;
+#endif
+#ifdef BYPASS_L2_LOGIC
+    mshr_packet.l2_bypassed = prior_l2_bypassed;
 #endif
 #ifdef BYPASS_LLC_LOGIC
     mshr_packet.llc_bypassed = prior_llc_bypassed;
@@ -836,7 +861,7 @@ void CACHE::handle_read() {
                             __builtin_prefetch(dst + i, 1, 3);
                         }
                         PROCESSED.add_queue(&RQ.entry[index]);
-                        DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                        DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                         cout << "[" << NAME << "_RQ_PROCESSED] " << __func__ << " instr_id: " << RQ.entry[index].instr_id << " Read Hit ";
                         cout << hex << " read: " << RQ.entry[index].address << dec;
                         cout << " idx: " << MAX_READ;
@@ -862,7 +887,7 @@ void CACHE::handle_read() {
                         // uint32_t way = l1d->find_victim(cpu, RQ.entry[index].instr_id, set, l1d->block[set], RQ.entry[index].ip, RQ.entry[index].full_addr, RQ.entry[index].type);
                         // l1d->PROCESSED.add_queue(&RQ.entry[index]);
                         PROCESSED.add_queue(&RQ.entry[index]);
-                        DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                        DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                         cout << "[" << NAME << "_RQ_ByP_PROCESSED] " << __func__  << " Read Hit" << " instr_id: " << RQ.entry[index].instr_id ;
                         dump_req(RQ.entry[index]);
                             // cout << hex << " read: " << RQ.entry[index].address << dec;
@@ -873,6 +898,15 @@ void CACHE::handle_read() {
                         cerr << "L2C PROCESSED FULL" << endl;
                         assert(0&&"RETURN IS LOST FOREVER!!!! ");
                     }
+                }
+#endif
+#ifdef BYPASS_L2_LOGIC
+                else if ((cache_type == IS_LLC) && (RQ.entry[index].type == LOAD && RQ.entry[index].l2_bypassed == 1 && !RQ.entry[index].instruction)) {
+                    DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                    cout << "[" << NAME << "_RQ_L2ByP_ret] " << __func__  << " L2 ByP Read Hit => L1D" << " instr_id: " << RQ.entry[index].instr_id ;
+                    dump_req(RQ.entry[index]);
+                    cout << endl; });
+                    upper_level_dcache[read_cpu]->upper_level_dcache[read_cpu]->return_data(&RQ.entry[index]);
                 }
 #endif
 
@@ -930,7 +964,7 @@ void CACHE::handle_read() {
                 #ifdef BYPASS_L1D_OnNewMiss
                     if (cache_type == IS_L1D && RQ.entry[index].type == LOAD && mshr_index == -1 && lower_level->RQ.SIZE > lower_level->RQ.occupancy && l1d_bypass_operate(cpu, (CACHE*)this, (CACHE*)lower_level, (CACHE*)lower_level->lower_level) && warmup_complete[cpu]) {
                         // if (warmup_complete[cpu]){
-                            DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                            DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                                     cout << "[" << NAME << "_L1_ByP] " << __func__;
                                     cout << " ";
                                     dump_req(RQ.entry[index]);
@@ -943,12 +977,31 @@ void CACHE::handle_read() {
                         // }
                     } else
                 #endif
+                #ifdef BYPASS_L2_LOGIC
+                if (cache_type == IS_L2C && RQ.entry[index].type == LOAD && !RQ.entry[index].instruction && mshr_index == -1
+                    && RQ.entry[index].l1_bypassed == 0
+                    && lower_level->RQ.SIZE > lower_level->RQ.occupancy
+                    && l2c_bypass_operate(cpu, (CACHE*)upper_level_dcache[cpu], (CACHE*)this, (CACHE*)lower_level)
+                    && warmup_complete[cpu]) {
+                        DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                                cout << "[" << NAME << "_L2_ByP] " << __func__;
+                                cout << " ";
+                                dump_req(RQ.entry[index]);
+                                cout << endl;
+                            };);
+                        RQ.entry[index].l2_bypassed = 1;
+                        RQ.entry[index].fill_level = FILL_LLC;
+                        total_ByP_cnt++;
+                        lower_level->add_rq(&RQ.entry[index]);
+                } else
+                #endif
                 #ifdef BYPASS_LLC_LOGIC
                 if (cache_type == IS_LLC && RQ.entry[index].type == LOAD && mshr_index == -1
+                    && RQ.entry[index].l2_bypassed == 0
                     && lower_level->RQ.SIZE > lower_level->RQ.occupancy
                     && llc_bypass_operate(cpu, (CACHE*)lower_level->lower_level, (CACHE*)lower_level, (CACHE*)this)
                     && warmup_complete[cpu]) {
-                        DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                        DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                                 cout << "[" << NAME << "_LLC_ByP] " << __func__;
                                 cout << " ";
                                 dump_req(RQ.entry[index]);
@@ -972,7 +1025,7 @@ void CACHE::handle_read() {
                                 if (RQ.entry[index].instr_id == 2001730 || (uint64_t) RQ.entry[index].address == 1514623703326)
                                     cout << " LLC MSHR ENTRY MADE, THIS IS THE PROBLEM PACKET RETURNED!!!!";
 #endif
-                                DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                                DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                                     cout << "[" << NAME << "_MSHR_NEW_MISS] " << __func__;
                                     cout << " and lower request to RQ ";
                                     dump_req(RQ.entry[index]);
@@ -1000,7 +1053,7 @@ void CACHE::handle_read() {
 #endif
 
                             add_mshr(&RQ.entry[index]);
-                            DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                            DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                                 cout << "[" << NAME << "_MSHR_NEW_MISS] " << __func__;
                                 cout << " and lower request to RQ ";
                                 dump_req(RQ.entry[index]);
@@ -1038,7 +1091,7 @@ void CACHE::handle_read() {
                             cerr << NAME << " MERGING BYPASSED RQ into existing MSHR: " << NAME << RQ.entry[index].type << " addr: " << RQ.entry[index].address << "instrID: " << RQ.entry[index].instr_id << " ROB: " << RQ.entry[index].rob_index << endl;
                         }
 #endif
-                        DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                        DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                             cout << "[" << NAME << "_MSHR_MERGING] " << __func__;
                             cout << " RQ ";
                             dump_req(RQ.entry[index]);
@@ -1101,7 +1154,7 @@ void CACHE::handle_read() {
 				                    MSHR.entry[mshr_index].sq_index_depend_on_me.join (RQ.entry[index].sq_index_depend_on_me, SQ_SIZE);
                                 }
                             }
-                            DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                            DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                                 cout << "[" << NAME << "_MSHR_POST_MERGE] " << __func__;
                                 dump_req(MSHR.entry[mshr_index]);
                                 cout <<  endl;
@@ -1138,7 +1191,7 @@ void CACHE::handle_read() {
                                                     l1d->MSHR.entry[m].lq_index_depend_on_me.insert(dep);
                                                 }
                                             }
-                                            DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[l1d->MSHR.cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                                            DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[l1d->MSHR.cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                                                 cout << "[" << NAME << "_MSHR_POST_MERGE] " << __func__;
                                                 cout << " before rm l1d->MSHR.entry.lq_index: " << l1d->MSHR.entry[m].lq_index;
                                                 dump_req(l1d->MSHR.entry[m]);
@@ -1146,7 +1199,7 @@ void CACHE::handle_read() {
                                             };);
                                             l1d->MSHR.entry[m].lq_index_depend_on_me.remove(
                                                 l1d->MSHR.entry[m].lq_index);
-                                            DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[l1d->MSHR.cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                                            DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[l1d->MSHR.cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                                                 cout << "[" << NAME << "_MSHR_POST_MERGE] " << __func__;
                                                 cout << " after rm l1d->MSHR.entry.lq_index: " << l1d->MSHR.entry[m].lq_index;
                                                 dump_req(l1d->MSHR.entry[m]);
@@ -1176,7 +1229,7 @@ void CACHE::handle_read() {
                                 //     l1d->MSHR.entry[l1d_mshr].lq_index_depend_on_me.insert(
                                 //         RQ.entry[index].lq_index);
                                 // }
-                                DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")){
+                                DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")){
                                     cout << "["<< NAME << "ByP MISMATCH] " << __func__;
                                      cout << " RQ";
                                      dump_req(RQ.entry[index]);
@@ -1187,13 +1240,51 @@ void CACHE::handle_read() {
                                 // cout << "LQ IS LOCATED THERE???? 101: " << MSHR.entry[mshr_index].lq_index_depend_on_me.search(101);
 #endif
                             } else {
-                                DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                                DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                                     cout << "["<< NAME << " ByP NOT mismatch] " << __func__;
                                     cout << " RQ";
                                     dump_req(RQ.entry[index]);
                                     cout << " MSHR";
                                     dump_req(MSHR.entry[mshr_index]);
                                     cout << endl;});
+                            }
+                        }
+#endif
+#ifdef BYPASS_L2_LOGIC
+                        // Reset L2 ByP if mismatch at LLC
+                        if (cache_type == IS_LLC) {
+                            if (RQ.entry[index].l2_bypassed != MSHR.entry[mshr_index].l2_bypassed) {
+                                if (MSHR.entry[mshr_index].type != PREFETCH) {
+                                    // Push bypass LQ(s) directly to L2C MSHR
+                                    auto *l2c = (CACHE *) this->upper_level_dcache[cpu];
+                                    for (uint16_t m = 0; m < l2c->MSHR_SIZE; m++) {
+                                        if (l2c->MSHR.entry[m].address == MSHR.entry[mshr_index].address) {
+                                            l2c->MSHR.entry[m].load_merged = 1;
+                                            l2c->MSHR.entry[m].lq_index_depend_on_me.insert(
+                                                RQ.entry[index].lq_index);
+                                            if (RQ.entry[index].load_merged) {
+                                                ITERATE_SET(dep, RQ.entry[index].lq_index_depend_on_me, LQ_SIZE) {
+                                                    l2c->MSHR.entry[m].lq_index_depend_on_me.insert(dep);
+                                                }
+                                            }
+                                            l2c->MSHR.entry[m].lq_index_depend_on_me.remove(
+                                                l2c->MSHR.entry[m].lq_index);
+                                            break;
+                                        }
+                                    }
+                                    RQ.entry[index].l2_bypassed = 0;
+                                    MSHR.entry[mshr_index].l2_bypassed = 0;
+                                    MSHR.entry[mshr_index].fill_level = FILL_L2;
+                                } else if (MSHR.entry[mshr_index].fill_level < fill_level) {
+                                    RQ.entry[index].l2_bypassed = 0;
+                                }
+                                DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")){
+                                    cout << "["<< NAME << " L2 ByP MISMATCH] " << __func__;
+                                     cout << " RQ";
+                                     dump_req(RQ.entry[index]);
+                                     cout << " MSHR";
+                                     dump_req(MSHR.entry[mshr_index]);
+                                     cout << endl;});
                             }
                         }
 #endif
@@ -1312,7 +1403,7 @@ void CACHE::handle_prefetch() {
 		        reads_available_this_cycle--;
             }
             else { // prefetch miss
-                DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[prefetch_cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[prefetch_cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                 cout << "[" << NAME << "_PQ_miss] " << __func__ << (int)this->cache_type;
                 cout << " instr_id: " << PQ.entry[index].instr_id << " addr: " << hex << PQ.entry[index].address;
                 cout << " full_addr: " << PQ.entry[index].full_addr << dec << " fill_level: " << (int) PQ.entry[index].fill_level;
@@ -1324,7 +1415,7 @@ void CACHE::handle_prefetch() {
 
                 if ((mshr_index == -1) && (MSHR.occupancy < MSHR_SIZE)) { // this is a new miss
 
-                    DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[PQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                    DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[PQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                     cout << "[" << NAME << "_PQ] " <<  __func__ << " want to add instr_id: " << PQ.entry[index].instr_id << " addr: " << hex << PQ.entry[index].address;
                     cout << " full_addr: " << PQ.entry[index].full_addr << dec;
                     cout << " occup: " << lower_level->get_occupancy(3, PQ.entry[index].address) << " SIZE: " << lower_level->get_size(3, PQ.entry[index].address) << endl; });
@@ -1404,9 +1495,18 @@ void CACHE::handle_prefetch() {
                             // else: no L1D MSHR — keep ByP=1, complete via L2C.PROCESSED
                         }
                     #endif
+                    #ifdef BYPASS_L2_LOGIC
+                        else if (MSHR.entry[mshr_index].l2_bypassed == 1) {
+                            auto *l2c = (CACHE *) this->upper_level_dcache[cpu];
+                            if (l2c->probe_mshr(&PQ.entry[index]) != -1) {
+                                MSHR.entry[mshr_index].fill_level = PQ.entry[index].fill_level;
+                                MSHR.entry[mshr_index].l2_bypassed = 0;
+                            }
+                        }
+                    #endif
                         }
                         MSHR_MERGED[PQ.entry[index].type]++;
-                        DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[prefetch_cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                        DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[prefetch_cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                         cout << "[" << NAME << "] " << __func__ << " mshr merged";
                         cout << " instr_id: " << PQ.entry[index].instr_id << " prior_id: " << MSHR.entry[mshr_index].instr_id;
                         dump_req(PQ.entry[index]);
@@ -1419,7 +1519,7 @@ void CACHE::handle_prefetch() {
                     }
                 }
                 if (miss_handled) {
-                    DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[prefetch_cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                    DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[prefetch_cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                     cout << "[" << NAME << "] " << __func__ << " prefetch miss handled";
                     cout << " instr_id: " << PQ.entry[index].instr_id << " addr: " << hex << PQ.entry[index].address;
                     cout << " full_addr: " << PQ.entry[index].full_addr << dec << " fill_level: " << (int)PQ.entry[index].fill_level;
@@ -1485,6 +1585,16 @@ void CACHE::operate() {
         if (cache_type == IS_L2C) {
             for (uint16_t i = 0; i < MSHR_SIZE; i++) {
                 if (MSHR.entry[i].address && MSHR.entry[i].l1_bypassed > 0) {
+                    has_byp = true;
+                    break;
+                }
+            }
+        }
+#endif
+#ifdef BYPASS_L2_LOGIC
+        if (cache_type == IS_LLC) {
+            for (uint16_t i = 0; i < MSHR_SIZE; i++) {
+                if (MSHR.entry[i].address && MSHR.entry[i].l2_bypassed > 0) {
                     has_byp = true;
                     break;
                 }
@@ -1569,7 +1679,7 @@ void CACHE::fill_cache(const uint32_t set, const uint32_t way, PACKET *packet) {
     block[set][way].cpu = packet->cpu;
     block[set][way].instr_id = packet->instr_id;
 
-    // DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+    // DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
     // cout << "[" << NAME << "] " << __func__ << " set: " << set << " way: " << way;
     // cout << " lru: " << block[set][way].lru << " tag: " << hex << block[set][way].tag << " full_addr: " << block[set][way].full_addr;
     // cout << " data: " << block[set][way].data << dec << endl; });
@@ -1602,7 +1712,7 @@ int CACHE::check_hit(PACKET *packet)
     for (uint32_t way=0; way<NUM_WAY; way++) {
         if (block[set][way].valid && (block[set][way].tag == packet->address)) {
             match_way = way;
-            DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+            DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
             cout << "[" << NAME << "] " << __func__ << " instr_id: " << packet->instr_id << " type: " << +packet->type << hex << " addr: " << packet->address;
             cout << " full_addr: " << packet->full_addr << " tag: " << block[set][way].tag << " data: " << block[set][way].data << dec;
             cout << " set: " << set << " way: " << way << " lru: " << block[set][way].lru;
@@ -1629,7 +1739,7 @@ int CACHE::invalidate_entry(uint64_t inval_addr) {
         if (block[set][way].valid && (block[set][way].tag == inval_addr)) {
             block[set][way].valid = 0;
             match_way = way;
-            DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+            DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
             cout << "[" << NAME << "] " << __func__ << " inval_addr: " << hex << inval_addr;
             cout << " tag: " << block[set][way].tag << " data: " << block[set][way].data << dec;
             cout << " set: " << set << " way: " << way << " lru: " << block[set][way].lru << " cy: " << current_core_cycle[cpu] << endl; });
@@ -1675,7 +1785,7 @@ int CACHE::add_rq(PACKET *packet) {
         if ((cache_type == IS_L1D) && (packet->type != PREFETCH)) {
             if (PROCESSED.occupancy < PROCESSED.SIZE)
                 PROCESSED.add_queue(packet);
-            DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+            DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
             cout << "[" << NAME << "_RQWQ_PROCESSED] " << __func__ << " instr_id: " << packet->instr_id << " found recent writebacks";
             cout << hex << " read: " << packet->address << " writeback: " << WQ.entry[wq_index].address << dec;
             cout << " idx: " << MAX_READ;
@@ -1693,11 +1803,23 @@ cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << 
 #endif
                 PROCESSED.add_queue(packet);
             }
-            DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+            DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
             cout << "[" << NAME << "_RQWQ_ByP_PROCESSED] " << __func__ << " instr_id: " << packet->instr_id << " found recent writebacks";
             cout << hex << " read: " << packet->address << " writeback: " << WQ.entry[wq_index].address << dec;
             cout << " idx: " << MAX_READ;
             cout << " WQ ByP: " << (int) WQ.entry[wq_index].l1_bypassed << " type: " << (int) WQ.entry[wq_index].type << " Pack ByP: " << (int) packet->l1_bypassed << " type: " << packet->type  << endl; });
+        }
+#endif
+#ifdef BYPASS_L2_LOGIC
+        if ((cache_type == IS_LLC) && (packet->type == LOAD) && packet->l2_bypassed == 1 && !packet->instruction) {
+            // if (PROCESSED.occupancy < PROCESSED.SIZE) {
+                upper_level_dcache[packet->cpu]->upper_level_dcache[packet->cpu]->return_data(packet);
+                // PROCESSED.add_queue(packet);
+            // }
+            DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+            cout << "[" << NAME << "_RQWQ_L2ByP_PROCESSED] " << __func__ << " instr_id: " << packet->instr_id << " found recent writebacks";
+            cout << hex << " read: " << packet->address << " writeback: " << WQ.entry[wq_index].address << dec;
+            cout << " Pack L2ByP: " << (int) packet->l2_bypassed << " type: " << packet->type  << endl; });
         }
 #endif
         HIT[packet->type]++;
@@ -1727,7 +1849,7 @@ cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << 
             uint16_t rob_index = packet->rob_index;
             RQ.entry[index].rob_index_depend_on_me.insert (rob_index);
             RQ.entry[index].instr_merged = 1;
-            // DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[packet->cpu]) {
+            // DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[packet->cpu]) {
             // cout << "[INSTR_MERGED] " << __func__ << " cpu: " << (int) packet->cpu << " instr_id: " << RQ.entry[index].instr_id;
             // cout << " merged idx: " << rob_index << " instr_id: " << packet->instr_id << endl; });
         } else {
@@ -1747,6 +1869,15 @@ cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << 
                     }
                 }
 #endif
+#ifdef BYPASS_L2_LOGIC
+                if (cache_type == IS_LLC) {
+                    if (RQ.entry[index].l2_bypassed != packet->l2_bypassed) {
+                        RQ.entry[index].l2_bypassed = 0;
+                        if (packet->fill_level < RQ.entry[index].fill_level)
+                            RQ.entry[index].fill_level = packet->fill_level;
+                    }
+                }
+#endif
 #ifdef BYPASS_LLC_LOGIC
                 if (cache_type == IS_LLC) {
                     if (RQ.entry[index].llc_bypassed != packet->llc_bypassed) {
@@ -1756,7 +1887,7 @@ cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << 
                     }
                 }
 #endif
-                DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                 cout << "[RFO_MERGED] " << __func__ << " cpu: " << (int) packet->cpu;
                 dump_req(packet);
                 dump_req(RQ.entry[index]);
@@ -1771,6 +1902,16 @@ cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << 
                 RQ.entry[index].lq_index_depend_on_me.insert(lq_index);
                 RQ.entry[index].lq_index_depend_on_me.join(packet->lq_index_depend_on_me, LQ_SIZE);  // ← ADD
                 RQ.entry[index].load_merged = 1;
+#ifdef BYPASS_L2_LOGIC
+                if (cache_type == IS_LLC) {
+                    if (RQ.entry[index].l2_bypassed != packet->l2_bypassed) {
+                        RQ.entry[index].l2_bypassed = 0;
+                        packet->l2_bypassed = 0;
+                        if (packet->fill_level < RQ.entry[index].fill_level)
+                            RQ.entry[index].fill_level = packet->fill_level;
+                    }
+                }
+#endif
 #ifdef BYPASS_LLC_LOGIC
                 if (cache_type == IS_LLC) {
                     if (RQ.entry[index].llc_bypassed != packet->llc_bypassed) {
@@ -1789,7 +1930,7 @@ cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << 
                         if (packet->fill_level < RQ.entry[index].fill_level)
                             RQ.entry[index].fill_level = packet->fill_level;
                     }
-                    DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                    DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
                     cout << "[ByP_DATA_MERGED] " << __func__ << " cpu: " << (int) packet->cpu;
                     dump_req(packet);
                     dump_req(RQ.entry[index]);
@@ -1798,7 +1939,7 @@ cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << 
                     cout <<  endl;});
                 } else {
 #endif
-                    DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[packet->cpu]) {
+                    DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[packet->cpu]) {
                         cout << "[NOT L2] " << __func__ << " cpu: " << (int) packet->cpu;
                         cout << " new Packet";
                         dump_req(packet);
@@ -1844,7 +1985,7 @@ cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << 
     RQ.tail++;
     if (RQ.tail >= RQ.SIZE)
         RQ.tail = 0;
-    DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+    DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
     cout << "[" << NAME << "_RQ] " <<  __func__;
     cout << " packet.add=>RQ";
     dump_req(packet);
@@ -1897,7 +2038,7 @@ int CACHE::add_wq(PACKET *packet) {
     WQ.tail++;
     if (WQ.tail >= WQ.SIZE)
         WQ.tail = 0;
-    DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[WQ.entry[index].cpu]) {
+    DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[WQ.entry[index].cpu]) {
     cout << "[" << NAME << "_WQ] " <<  __func__ << " instr_id: " << WQ.entry[index].instr_id << " addr: " << hex << WQ.entry[index].address;
     cout << " full_addr: " << WQ.entry[index].full_addr << dec;
     cout << " head: " << WQ.head << " tail: " << WQ.tail << " occup: " << WQ.occupancy;
@@ -1972,7 +2113,7 @@ int CACHE::add_pq(PACKET *packet) {
     // check occupancy
     if (PQ.occupancy == PQ_SIZE) {
         PQ.FULL++;
-        DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+        DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
         cout << "[" << NAME << "] cannot process add_pq since it is full" << endl; });
         return -2; // cannot handle this request
     }
@@ -2002,7 +2143,7 @@ int CACHE::add_pq(PACKET *packet) {
     if (PQ.tail >= PQ.SIZE)
         PQ.tail = 0;
 
-    DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[PQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+    DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[PQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
     cout << "[" << NAME << "_PQ] " <<  __func__;
     //     << " instr_id: " << PQ.entry[index].instr_id << " addr: " << hex << PQ.entry[index].address;
     // cout << " full_addr: " << PQ.entry[index].full_addr << dec;
@@ -2041,7 +2182,7 @@ void CACHE::return_data(PACKET *packet) {
         assert(0);
     }
 #endif
-    DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[packet->cpu]) {
+    DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[packet->cpu]) {
     cout << "[" << NAME << "MSHR_ret_before] " <<  __func__;
     dump_req(packet);
     cout << " MSHR: ";
@@ -2142,7 +2283,7 @@ void CACHE::return_data(PACKET *packet) {
 
     update_fill_cycle();
 
-    DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[packet->cpu]) {
+    DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[packet->cpu]) {
     cout << "[" << NAME << "_MSHR_ret_after] " <<  __func__;
     cout << " MSHR";
     dump_req(MSHR.entry[mshr_index]);
@@ -2164,7 +2305,7 @@ void CACHE::update_fill_cycle() {
             min_cycle = MSHR.entry[i].event_cycle;
             min_index = i;
         }
-        // DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[MSHR.entry[i].cpu]) {
+        // DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[MSHR.entry[i].cpu]) {
         // cout << "[" << NAME << "_MSHR] " <<  __func__ << " checking instr_id: " << MSHR.entry[i].instr_id;
         // cout << " addr: " << hex << MSHR.entry[i].address << " full_addr: " << MSHR.entry[i].full_addr;
         // cout << " data: " << MSHR.entry[i].data << dec << " returned: " << +MSHR.entry[i].returned << " fill_level: " << (int) MSHR.entry[i].fill_level;
@@ -2175,7 +2316,7 @@ void CACHE::update_fill_cycle() {
     MSHR.next_fill_cycle = min_cycle;
     MSHR.next_fill_index = min_index;
     if (min_index < MSHR.SIZE) {
-        // DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[MSHR.entry[min_index].cpu]) {
+        // DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[MSHR.entry[min_index].cpu]) {
         // cout << "[" << NAME << "_MSHR] " <<  __func__ << " instr_id: " << MSHR.entry[min_index].instr_id;
         // cout << " addr: " << hex << MSHR.entry[min_index].address << " full_addr: " << MSHR.entry[min_index].full_addr;
         // cout << " data: " << MSHR.entry[min_index].data << dec << " num_returned: " << MSHR.num_returned;
@@ -2207,13 +2348,19 @@ int CACHE::check_mshr(PACKET *packet) {
                 MSHR.entry[index].fill_level = packet->fill_level;
             }
 #endif
+#ifdef BYPASS_L2_LOGIC
+            if (MSHR.entry[index].l2_bypassed == 1 && packet->l2_bypassed == 0 && packet->type == LOAD) {
+                MSHR.entry[index].l2_bypassed = 0;
+                MSHR.entry[index].fill_level = packet->fill_level;
+            }
+#endif
 #ifdef BYPASS_LLC_LOGIC
             if (MSHR.entry[index].llc_bypassed == 1 && packet->llc_bypassed == 0 && packet->type == LOAD) {
                 MSHR.entry[index].llc_bypassed = 0;
                 MSHR.entry[index].fill_level = packet->fill_level;
             }
 #endif
-        DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+        DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
             cout << "[" << NAME << "_MSHR] " << __func__ << " EQUIVALENT new entry";
             dump_req(packet);
             cout << " MSHR";
@@ -2226,10 +2373,10 @@ int CACHE::check_mshr(PACKET *packet) {
             return index;
         }
     }
-    DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+    DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
     cout << "[" << NAME << "_MSHR] " << __func__ << " new addr: " << hex << packet->address;
     // cout << " full_addr: " << packet->full_addr << dec << endl; });
-    // DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[packet->cpu] && (MSHR.occupancy == MSHR_SIZE) && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+    // DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[packet->cpu] && (MSHR.occupancy == MSHR_SIZE) && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
     // cout << "[" << NAME << "_MSHR] " << __func__ << " mshr is full";
     // cout << " instr_id: " << packet->instr_id << " mshr occup: " << MSHR.occupancy;
     // cout << " addr: " << hex << packet->address;
@@ -2251,7 +2398,7 @@ inline void CACHE::add_mshr(PACKET *packet) {
             MSHR.entry[index].returned = INFLIGHT;
 
             MSHR.occupancy++;
-            DP( if ((current_core_cycle[cpu] > 63700) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+            DP( if ((current_core_cycle[cpu] > 4880750) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
             cout << "[" << NAME << "_MSHR] " << __func__;
             dump_req(packet);
             cout << " MSHR";

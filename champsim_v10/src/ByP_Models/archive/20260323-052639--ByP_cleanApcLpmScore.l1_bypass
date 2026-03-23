@@ -1,14 +1,6 @@
 #include "cache.h"
 #include "lpm_tracker.h"
 
-#ifndef L1D_type
-#define L1D_type  4
-#define L2C_type  5
-#define LLC_type  6
-#endif
-
-
-
 // USEFUL VARS:  usage example
 //  * Cached metrics available without sim_access:
 //  *   lpm[cpu][IS_L1D].c_amat_val   ← ω(L1D)/α(L1D)
@@ -21,25 +13,26 @@
 //  *   lpm[cpu][IS_L1D].h, .m, .x, .e
 //  *   lpm[cpu][IS_L1D].omega()
 
-// L2C->MSHR.occupancy      L2C->MSHR.SIZE
-// L2C->RQ.occupancy        L2C->RQ.SIZE
-// L2C->PQ.occupancy        L2C->PQ.SIZE
+// L1D->MSHR.occupancy      L1D->MSHR.SIZE
+// L1D->RQ.occupancy        L1D->RQ.SIZE
+// L1D->PQ.occupancy        L1D->PQ.SIZE
 // L2C->MSHR.occupancy      L2C->MSHR.SIZE
 // L2C->RQ.occupancy        L2C->RQ.SIZE
 // L2C->PQ.occupancy        L2C->PQ.SIZE
 
 // CACHE TYPEs
+#ifndef L1D_type
+#define L1D_type  4
+#define L2C_type  5
+#define LLC_type  6
+#endif
 
+static bool l1_bypass_init = false;
 
-
-
-static bool l2_bypass_init = false;
-
-#define SHALL_L2C_BYPASS_DEFINED
-inline bool l2c_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
-    if (l2_bypass_init == false){
+inline bool l1d_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (l1_bypass_init == false){
         cout << "Bypass on: Clean APC LPM score: bypass when L1 pressure times L2 free supply times layer mismatch exceeds one." << endl;
-        l2_bypass_init = true;
+        l1_bypass_init = true;
     }
 
 
@@ -58,10 +51,10 @@ if (apc_l2  < 1e-6) apc_l2  = 1e-6;
 if (lpmr_l1 < 1e-6) lpmr_l1 = 1e-6;
 if (lpmr_l2 < 1e-6) lpmr_l2 = 1e-6;
 
-double l2_util = (double)L2C->MSHR.occupancy / (double)L2C->MSHR.SIZE;
-double free_llc = (double)(LLC->MSHR.SIZE - LLC->MSHR.occupancy);
+double l1_util = (double)L1D->MSHR.occupancy / (double)L1D->MSHR.SIZE;
+double free_l2 = (double)(L2C->MSHR.SIZE - L2C->MSHR.occupancy);
 
-double score = l2_util * free_llc * apc_l2 * (lpmr_l1 / lpmr_l2);
+double score = l1_util * free_l2 * apc_l2 * (lpmr_l1 / lpmr_l2);
 
 return score > 1.0;
 }
