@@ -191,12 +191,8 @@ void CACHE::handle_fill() {
         uint16_t mshr_index = MSHR.next_fill_index;
 
         // find victim
-        uint32_t set = get_set(MSHR.entry[mshr_index].address), way;
-        if (cache_type == IS_LLC) {
-            way = llc_find_victim(fill_cpu, MSHR.entry[mshr_index].instr_id, set, block[set], MSHR.entry[mshr_index].ip, MSHR.entry[mshr_index].full_addr, MSHR.entry[mshr_index].type);
-        }
-        else
-            way = find_victim(fill_cpu, MSHR.entry[mshr_index].instr_id, set, block[set], MSHR.entry[mshr_index].ip, MSHR.entry[mshr_index].full_addr, MSHR.entry[mshr_index].type);
+        uint32_t set = get_set(MSHR.entry[mshr_index].address);
+        uint32_t way = handle_fill_find_victim(fill_cpu, mshr_index, set);
 
 #ifdef LLC_BYPASS
         if ((cache_type == IS_LLC) && (way == LLC_WAY)) { // this is a bypass that does not fill the LLC
@@ -210,18 +206,10 @@ void CACHE::handle_fill() {
                 update_replacement_state(fill_cpu, set, way, MSHR.entry[mshr_index].full_addr, MSHR.entry[mshr_index].ip, 0, MSHR.entry[mshr_index].type, 0);
 
             // COLLECT STATS
-            sim_miss[fill_cpu][MSHR.entry[mshr_index].type]++;
-            sim_access[fill_cpu][MSHR.entry[mshr_index].type]++;
-            if (MSHR.entry[mshr_index].type == LOAD) {
-                sim_miss_wByP[fill_cpu]++;
-                sim_access_wByP[fill_cpu]++;
-            }
+            handle_fill_stats(fill_cpu, mshr_index);
 
             // check fill level
-            if (MSHR.entry[mshr_index].fill_level < fill_level) {
-
-                return_to_upper_level(MSHR.entry[mshr_index]);
-            }
+            handle_fill_return(mshr_index);
 
 	    if(warmup_complete[fill_cpu])
 	      {
@@ -238,208 +226,41 @@ void CACHE::handle_fill() {
         }
 #endif
 
-        uint8_t  do_fill = 1;
+        uint8_t do_fill = 1;
 
         // is this dirty?
-        if (block[set][way].dirty) {
-
-            // check if the lower level WQ has enough room to keep this writeback request
-            if (lower_level) {
-                if (lower_level->get_occupancy(2, block[set][way].address) == lower_level->get_size(2, block[set][way].address)) {
-
-                    // lower level WQ is full, cannot replace this victim
-                    do_fill = 0;
-                    lower_level->increment_WQ_FULL(block[set][way].address);
-                    STALL[MSHR.entry[mshr_index].type]++;
-
-                    // DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[fill_cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
-                    // cout << "[" << NAME << "] " << __func__ << "do_fill: " << +do_fill;
-                    // cout << " lower level wq is full!" << " fill_addr: " << hex << MSHR.entry[mshr_index].address;
-                    // cout << " victim_addr: " << block[set][way].tag << dec << endl; });
-                }
-                else {
-                    PACKET writeback_packet;
-
-                    writeback_packet.fill_level = fill_level << 1;
-                    writeback_packet.cpu = fill_cpu;
-                    writeback_packet.address = block[set][way].address;
-                    writeback_packet.full_addr = block[set][way].full_addr;
-                    writeback_packet.data = block[set][way].data;
-                    writeback_packet.instr_id = MSHR.entry[mshr_index].instr_id;
-                    writeback_packet.ip = 0; // writeback does not have ip
-                    writeback_packet.type = WRITEBACK;
-                    writeback_packet.event_cycle = current_core_cycle[fill_cpu];
-#ifdef BYPASS_DEBUG
-                    if (MSHR.entry[mshr_index].l1_bypassed == 1)
-                        cerr << " THIS IS WriteBack that HAS ByP set ... " << endl;
-#endif
-
-                    lower_level->add_wq(&writeback_packet);
-                }
-            }
-#ifdef TRUE_SANITY_CHECK
-            else {
-                // sanity check
-                if (cache_type != IS_STLB)
-                    assert(0);
-            }
-#endif
-        }
+        handle_fill_evict_dirty(fill_cpu, mshr_index, set, way, do_fill);
 
         if (do_fill){
             // update prefetcher
-            if (cache_type == IS_L1D)
-	      l1d_prefetcher_cache_fill(MSHR.entry[mshr_index].full_addr, set, way, (MSHR.entry[mshr_index].type == PREFETCH) ? 1 : 0, block[set][way].address<<LOG2_BLOCK_SIZE,
-					MSHR.entry[mshr_index].pf_metadata);
-            if  (cache_type == IS_L2C)
-	      MSHR.entry[mshr_index].pf_metadata = l2c_prefetcher_cache_fill(MSHR.entry[mshr_index].address<<LOG2_BLOCK_SIZE, set, way, (MSHR.entry[mshr_index].type == PREFETCH) ? 1 : 0,
-									     block[set][way].address<<LOG2_BLOCK_SIZE, MSHR.entry[mshr_index].pf_metadata);
-            if (cache_type == IS_LLC){
-		        cpu = fill_cpu;
-		        MSHR.entry[mshr_index].pf_metadata = llc_prefetcher_cache_fill(MSHR.entry[mshr_index].address<<LOG2_BLOCK_SIZE, set, way, (MSHR.entry[mshr_index].type == PREFETCH) ? 1 : 0,
-									       block[set][way].address<<LOG2_BLOCK_SIZE, MSHR.entry[mshr_index].pf_metadata);
-                cpu = 0;
-	      }
+            handle_fill_pf_fill(fill_cpu, mshr_index, set, way);
 
             // update replacement policy
-            if (cache_type == IS_LLC) {
-                llc_update_replacement_state(fill_cpu, set, way, MSHR.entry[mshr_index].full_addr, MSHR.entry[mshr_index].ip, block[set][way].full_addr, MSHR.entry[mshr_index].type, 0);
-            }
-            else
-                update_replacement_state(fill_cpu, set, way, MSHR.entry[mshr_index].full_addr, MSHR.entry[mshr_index].ip, block[set][way].full_addr, MSHR.entry[mshr_index].type, 0);
+            handle_fill_replacement(fill_cpu, mshr_index, set, way);
 
             // COLLECT STATS
-            sim_miss[fill_cpu][MSHR.entry[mshr_index].type]++;
-            sim_access[fill_cpu][MSHR.entry[mshr_index].type]++;
-            if (MSHR.entry[mshr_index].type == LOAD) {
-                sim_miss_wByP[fill_cpu]++;
-                sim_access_wByP[fill_cpu]++;
-            }
+            handle_fill_stats(fill_cpu, mshr_index);
 
-            fill_cache(set, way, &MSHR.entry[mshr_index]);
-
-            // RFO marks cache line dirty
-            if (cache_type == IS_L1D) {
-                if (MSHR.entry[mshr_index].type == RFO)
-                    block[set][way].dirty = 1;
-            }
-            // if (cache_type == IS_L2C) {
-            //     if (MSHR.entry[mshr_index].type == RFO)
-            //         assert(0&&" DID NOT EXPECT L2C TO HANDLE RFO ... ");
-            // }
+            // fill cache and mark dirty if RFO
+            handle_fill_cache_and_dirty(mshr_index, set, way);
 
             // check fill level
-            if (MSHR.entry[mshr_index].fill_level < fill_level) {
+            handle_fill_return(mshr_index);
 
-                return_to_upper_level(MSHR.entry[mshr_index]);
-            }
+            // update processed packets / bypass returns
+            handle_fill_processed_and_bypass_return(fill_cpu, mshr_index, set, way);
 
-
-            // update processed packets
-            if (cache_type == IS_ITLB) {
-                MSHR.entry[mshr_index].instruction_pa = block[set][way].data;
-                if (PROCESSED.occupancy < PROCESSED.SIZE){
-
-                    PROCESSED.add_queue(&MSHR.entry[mshr_index]);
-                } else {
-                    cerr << "ITLB PROCESSED FULL" << endl;
-                    assert(0&&"RETURN IS LOST FOREVER!!!! ");
-                }
-            }
-            else if (cache_type == IS_DTLB) {
-                MSHR.entry[mshr_index].data_pa = block[set][way].data;
-                if (PROCESSED.occupancy < PROCESSED.SIZE){
-
-                    PROCESSED.add_queue(&MSHR.entry[mshr_index]);
-                } else {
-                    cerr << "DTLB PROCESSED FULL" << endl;
-                    assert(0&&"RETURN IS LOST FOREVER!!!! ");
-                }
-            }
-            else if (cache_type == IS_L1I) {
-                if (PROCESSED.occupancy < PROCESSED.SIZE){
-
-                    PROCESSED.add_queue(&MSHR.entry[mshr_index]);
-                } else {
-                    cerr << "L1I PROCESSED FULL" << endl;
-                    assert(0&&"RETURN IS LOST FOREVER!!!! ");
-                }
-            }
-            //else if (cache_type == IS_L1D) {
-            else if ((cache_type == IS_L1D) && (MSHR.entry[mshr_index].type != PREFETCH)) {
-                if (PROCESSED.occupancy < PROCESSED.SIZE){
-                    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[MSHR.entry[mshr_index].cpu]) {
-                        // print: instr, hex addr, hex full addr, MSHR, occupancy, event cy, curr cy, MSHR ByP, (int) type, (int) fill lvl,
-                        cout << "[" << NAME << "_FILL_PROCESSED] " << __func__ << " L1D add processed instrID: " <<  MSHR.entry[mshr_index].instr_id;
-                        cout << " addr: " <<  hex << MSHR.entry[mshr_index].address << " full_addr: " << MSHR.entry[mshr_index].full_addr << dec;
-                        cout << " occupancy: " << (int)MSHR.occupancy << " event cy: " << MSHR.entry[mshr_index].event_cycle << " curr cy: " << current_core_cycle[cpu];
-                        cout << " BYP: " << (int)MSHR.entry[mshr_index].l1_bypassed << " type: " << (int)MSHR.entry[mshr_index].type << " fill lvl: " << (int)MSHR.entry[mshr_index].fill_level;
-                        cout << endl;
-                    });
-                    PROCESSED.add_queue(&MSHR.entry[mshr_index]);
-                } else {
-                    cerr << "L1D PROCESSED FULL" << endl;
-                    assert(0&&"RETURN IS LOST FOREVER!!!! ");
-                }
-            }
-#ifdef BYPASS_L1_LOGIC
-            else if ((cache_type == IS_L2C) && (MSHR.entry[mshr_index].type == LOAD) && MSHR.entry[mshr_index].l1_bypassed == 1 ) {
-                if (PROCESSED.occupancy < PROCESSED.SIZE){
-#ifdef BYPASS_DEBUG
-                    cout << " L2C ByP complete? " << (int) MSHR.entry[mshr_index].l1_bypassed << endl;
-                    cout << " L2C IS completing some packets: " << " instrID: " <<  MSHR.entry[mshr_index].instr_id  << " rob: " <<  MSHR.entry[mshr_index].rob_index << " addr: " <<  MSHR.entry[mshr_index].address << endl;
-#endif
-                    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[MSHR.entry[mshr_index].cpu]) {
-                        // print: instr, hex addr, hex full addr, MSHR, occupancy, event cy, curr cy, MSHR ByP, (int) type, (int) fill lvl,
-                        cout << "[" << NAME << "_FILL_ByP_PROCESSED] " << __func__ << " L2C=>L1D add processed instrID: " <<  MSHR.entry[mshr_index].instr_id;
-                        cout << " addr: " <<  hex << MSHR.entry[mshr_index].address << " full_addr: " << MSHR.entry[mshr_index].full_addr << dec;
-                        cout << " occupancy: " << (int)MSHR.occupancy << " event cy: " << MSHR.entry[mshr_index].event_cycle << " curr cy: " << current_core_cycle[cpu];
-                        cout << " BYP: " << (int)MSHR.entry[mshr_index].l1_bypassed << " type: " << (int)MSHR.entry[mshr_index].type << " fill lvl: " << (int)MSHR.entry[mshr_index].fill_level;
-                        cout << endl;
-                    });
-                    PROCESSED.add_queue(&MSHR.entry[mshr_index]);
-                } else {
-                    cerr << "L2C PROCESSED FULL" << endl;
-                    assert(0&&"RETURN IS LOST FOREVER!!!! ");
-                }
-            }
-#endif
-#ifdef BYPASS_L2_LOGIC
-            else if ((cache_type == IS_LLC) && (MSHR.entry[mshr_index].type == LOAD) && MSHR.entry[mshr_index].l2_bypassed == 1 ) {
-                    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[MSHR.entry[mshr_index].cpu]) {
-                        cout << "[" << NAME << "_FILL_ByP_ret] " << __func__ << " LLC=>L1D return instrID: " <<  MSHR.entry[mshr_index].instr_id;
-                        cout << " addr: " <<  hex << MSHR.entry[mshr_index].address << " full_addr: " << MSHR.entry[mshr_index].full_addr << dec;
-                        cout << " occupancy: " << (int)MSHR.occupancy << " event cy: " << MSHR.entry[mshr_index].event_cycle << " curr cy: " << current_core_cycle[cpu];
-                        cout << " BYP: " << (int)MSHR.entry[mshr_index].l2_bypassed << " type: " << (int)MSHR.entry[mshr_index].type << " fill lvl: " << (int)MSHR.entry[mshr_index].fill_level;
-                        cout << endl;
-                    });
-                    upper_level_dcache[fill_cpu]->upper_level_dcache[fill_cpu]->return_data(&MSHR.entry[mshr_index]);
-            }
-#endif
-
-	        if(warmup_complete[fill_cpu]){
-		        uint64_t current_miss_latency = (current_core_cycle[fill_cpu] - MSHR.entry[mshr_index].cycle_enqueued);
-		        total_miss_latency += current_miss_latency;
-	        }
-#ifdef BYPASS_DEBUG
-            if (MSHR.entry[mshr_index].instr_id == 2001730)
-                cout << " CATCH !!! instr: " << MSHR.entry[mshr_index].instr_id << " ByP: " << (int) MSHR.entry[mshr_index].l1_bypassed << endl;
-#endif
-
-            MSHR.remove_queue(&MSHR.entry[mshr_index]);
-            MSHR.num_returned--;
-
-            update_fill_cycle();
+            // update miss latency, remove MSHR, update fill cycle
+            handle_fill_remove(fill_cpu, mshr_index);
         }
     }
 }
 
-inline void CACHE::merge_with_prefetch(PACKET &mshr_packet, PACKET &queue_packet ) {
+void CACHE::merge_with_prefetch(PACKET &mshr_packet, PACKET &queue_packet) {
     // ORIGINAL info retainer
     uint8_t prior_returned = mshr_packet.returned;
     uint64_t prior_event_cycle = mshr_packet.event_cycle;
 #ifdef BYPASS_L1_LOGIC
-    // uint8_t  prior_bypassed = mshr_packet.bypassed_levels;
     uint8_t prior_fill = mshr_packet.fill_level;
     uint8_t prior_l1_bypassed = mshr_packet.l1_bypassed;
 #endif
@@ -449,16 +270,10 @@ inline void CACHE::merge_with_prefetch(PACKET &mshr_packet, PACKET &queue_packet
 #ifdef BYPASS_LLC_LOGIC
     uint8_t prior_llc_bypassed = mshr_packet.llc_bypassed;
 #endif
-#ifdef DEBUG_PRINT
-    if (warmup_complete[0])
-        cout << "MSHR " << (int)mshr_packet.type << " Q: " << (int)queue_packet.type << endl;
-#endif
     mshr_packet = queue_packet;
-
     // restore original retained data
     mshr_packet.returned = prior_returned;
     mshr_packet.event_cycle = prior_event_cycle;
-    // mshr_packet.bypassed_levels = prior_bypassed;
 #ifdef BYPASS_L1_LOGIC
     mshr_packet.fill_level = prior_fill;
     mshr_packet.l1_bypassed = prior_l1_bypassed;
@@ -469,28 +284,6 @@ inline void CACHE::merge_with_prefetch(PACKET &mshr_packet, PACKET &queue_packet
 #ifdef BYPASS_LLC_LOGIC
     mshr_packet.llc_bypassed = prior_llc_bypassed;
 #endif
-//     if (cache_type == IS_L2C) {
-//         // === FIX: push bypass LQ deps into L1D MSHR now ===
-//         auto *l1d = (CACHE *) this->upper_level_dcache[cpu];
-//         int l1d_mshr = l1d->check_mshr(&mshr_packet); // same addr, L1D MSHR alive
-//         if (l1d_mshr != -1) {
-//             if (l1d->MSHR.entry[l1d_mshr].type == PREFETCH)
-//                 cout << " PREFETCH PROPAGATE";
-//             // ORIGINAL info retainer
-//             uint8_t prior_returned = l1d->MSHR.entry[l1d_mshr].returned;
-//             uint64_t prior_event_cycle = l1d->MSHR.entry[l1d_mshr].event_cycle;
-// #ifdef BYPASS_L1_LOGIC
-//             uint8_t  prior_bypassed = l1d->MSHR.entry[l1d_mshr].bypassed_levels;
-//             uint8_t prior_fill = l1d->MSHR.entry[l1d_mshr].fill_level;
-// #endif
-//             l1d->MSHR.entry[l1d_mshr] = mshr_packet;
-//             l1d->MSHR.entry[l1d_mshr].returned = prior_returned;
-//             l1d->MSHR.entry[l1d_mshr].event_cycle = prior_event_cycle;
-//             l1d->MSHR.entry[l1d_mshr].bypassed_levels = 0;
-//             mshr_packet.bypassed_levels = 0;
-//         }
-//     }
-
 }
 
 void CACHE::handle_writeback() {
@@ -508,39 +301,7 @@ void CACHE::handle_writeback() {
         int way = check_hit(&WQ.entry[index]);
 
         if (way >= 0) { // writeback hit (or RFO hit for L1D)
-
-            if (cache_type == IS_LLC) {
-                llc_update_replacement_state(writeback_cpu, set, way, block[set][way].full_addr, WQ.entry[index].ip, 0, WQ.entry[index].type, 1);
-
-            }
-            else
-                update_replacement_state(writeback_cpu, set, way, block[set][way].full_addr, WQ.entry[index].ip, 0, WQ.entry[index].type, 1);
-
-            // COLLECT STATS
-            sim_hit[writeback_cpu][WQ.entry[index].type]++;
-            sim_access[writeback_cpu][WQ.entry[index].type]++;
-
-            // mark dirty
-            block[set][way].dirty = 1;
-
-            if (cache_type == IS_ITLB)
-                WQ.entry[index].instruction_pa = block[set][way].data;
-            else if (cache_type == IS_DTLB)
-                WQ.entry[index].data_pa = block[set][way].data;
-            else if (cache_type == IS_STLB)
-                WQ.entry[index].data = block[set][way].data;
-
-            // check fill level
-            if (WQ.entry[index].fill_level < fill_level) {
-
-                return_to_upper_level(WQ.entry[index]);
-            }
-
-            HIT[WQ.entry[index].type]++;
-            ACCESS[WQ.entry[index].type]++;
-
-            // remove this entry from WQ
-            WQ.remove_queue(&WQ.entry[index]);
+            handle_writeback_hit(writeback_cpu, index, set, way);
         }
         else { // writeback miss (or RFO miss for L1D)
             if (cache_type == IS_L1D) { // RFO miss
@@ -548,56 +309,13 @@ void CACHE::handle_writeback() {
                 uint8_t miss_handled = 1;
                 int mshr_index = check_mshr(&WQ.entry[index]);
                 if ((mshr_index == -1) && (MSHR.occupancy < MSHR_SIZE)) { // this is a new miss
-                    if(cache_type == IS_LLC) {
-                        // check to make sure the DRAM RQ has room for this LLC RFO miss
-                        if (lower_level->get_occupancy(1, WQ.entry[index].address) == lower_level->get_size(1, WQ.entry[index].address)){
-                            miss_handled = 0;
-                        } else {
-                            add_mshr(&WQ.entry[index]);
-                            lower_level->add_rq(&WQ.entry[index]);
-                        }
-                    // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL
-                    } else {
-                        if (lower_level &&
-                            lower_level->get_occupancy(1, WQ.entry[index].address) == lower_level->get_size(1, WQ.entry[index].address)) {
-                            miss_handled = 0;
-                        } else {
-                            add_mshr(&WQ.entry[index]);
-                            lower_level->add_rq(&WQ.entry[index]);
-                        }
-                    }
-                    // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL
-                    // } else {
-                    //     // add it to mshr (RFO miss)
-                    //     add_mshr(&WQ.entry[index]);
-
-                    //     // add it to the next level's read queue
-                    //     //if (lower_level) // L1D always has a lower level cache
-                    //     lower_level->add_rq(&WQ.entry[index]);
-		            // }
+                    handle_writeback_miss_new(index, miss_handled);
                 } else {
                     if ((mshr_index == -1) && (MSHR.occupancy == MSHR_SIZE)) { // not enough MSHR resource
-                        // cannot handle miss request until one of MSHRs is available
-                        miss_handled = 0;
-                        STALL[WQ.entry[index].type]++;
+                        handle_writeback_miss_mshr_full(index, miss_handled);
                     }
                     else if (mshr_index != -1) { // already in-flight miss
-                        // update fill_level
-                        if (WQ.entry[index].fill_level < MSHR.entry[mshr_index].fill_level)
-                            MSHR.entry[mshr_index].fill_level = WQ.entry[index].fill_level;
-                        // update request
-                        if (MSHR.entry[mshr_index].type == PREFETCH) {
-                            merge_with_prefetch(MSHR.entry[mshr_index], WQ.entry[index]);
-                            // uint8_t  prior_returned = MSHR.entry[mshr_index].returned;
-                            // uint64_t prior_event_cycle = MSHR.entry[mshr_index].event_cycle;
-			                // MSHR.entry[mshr_index] = WQ.entry[index];
-                   //
-                            // // in case request is already returned, we should keep event_cycle and retunred variables
-                            // MSHR.entry[mshr_index].returned = prior_returned;
-                            // MSHR.entry[mshr_index].event_cycle = prior_event_cycle;
-                        }
-
-                        MSHR_MERGED[WQ.entry[index].type]++;
+                        handle_writeback_miss_inflight(index, mshr_index);
                     }
                     else { // WE SHOULD NOT REACH HERE
                         cerr << "[" << NAME << "] MSHR errors" << endl;
@@ -606,719 +324,148 @@ void CACHE::handle_writeback() {
                 }
 
                 if (miss_handled) {
-
-                    MISS[WQ.entry[index].type]++;
-                    ACCESS[WQ.entry[index].type]++;
-
-                    // remove this entry from WQ
-                    WQ.remove_queue(&WQ.entry[index]);
+                    handle_writeback_miss_handled_stats_remove(index);
                 }
 
             }
             else {
                 // find victim
-                uint32_t set = get_set(WQ.entry[index].address), way;
-                if (cache_type == IS_LLC) {
-                    way = llc_find_victim(writeback_cpu, WQ.entry[index].instr_id, set, block[set], WQ.entry[index].ip, WQ.entry[index].full_addr, WQ.entry[index].type);
-                }
-                else
-                    way = find_victim(writeback_cpu, WQ.entry[index].instr_id, set, block[set], WQ.entry[index].ip, WQ.entry[index].full_addr, WQ.entry[index].type);
+                uint32_t set = get_set(WQ.entry[index].address);
+                uint32_t way2 = handle_writeback_find_victim(writeback_cpu, index, set);
 
 #ifdef LLC_BYPASS
-                if ((cache_type == IS_LLC) && (way == LLC_WAY)) {
+                if ((cache_type == IS_LLC) && (way2 == LLC_WAY)) {
                     cerr << "LLC bypassing for writebacks is not allowed!" << endl;
                     assert(0);
                 }
 #endif
 
-                uint8_t  do_fill = 1;
+                uint8_t do_fill = 1;
 
                 // is this dirty?
-                if (block[set][way].dirty) {
+                handle_writeback_evict_dirty(writeback_cpu, index, set, way2, do_fill);
 
-                    // check if the lower level WQ has enough room to keep this writeback request
-                    if (lower_level) {
-                        if (lower_level->get_occupancy(2, block[set][way].address) == lower_level->get_size(2, block[set][way].address)) {
-
-                            // lower level WQ is full, cannot replace this victim
-                            do_fill = 0;
-                            lower_level->increment_WQ_FULL(block[set][way].address);
-                            STALL[WQ.entry[index].type]++;
-
-                        }
-                        else {
-                            PACKET writeback_packet;
-
-                            writeback_packet.fill_level = fill_level << 1;
-                            writeback_packet.cpu = writeback_cpu;
-                            writeback_packet.address = block[set][way].address;
-                            writeback_packet.full_addr = block[set][way].full_addr;
-                            writeback_packet.data = block[set][way].data;
-                            writeback_packet.instr_id = WQ.entry[index].instr_id;
-                            writeback_packet.ip = 0;
-                            writeback_packet.type = WRITEBACK;
-                            writeback_packet.event_cycle = current_core_cycle[writeback_cpu];
-
-                            lower_level->add_wq(&writeback_packet);
-                        }
-                    }
-#ifdef TRUE_SANITY_CHECK
-                    else {
-                        // sanity check
-                        if (cache_type != IS_STLB)
-                            assert(0);
-                    }
-#endif
-                }
-                
                 if (do_fill) {
-                    // update prefetcher
-                    if (cache_type == IS_L1D)
-		      l1d_prefetcher_cache_fill(WQ.entry[index].full_addr, set, way, 0, block[set][way].address<<LOG2_BLOCK_SIZE, WQ.entry[index].pf_metadata);
-                    else if (cache_type == IS_L2C)
-		      WQ.entry[index].pf_metadata = l2c_prefetcher_cache_fill(WQ.entry[index].address<<LOG2_BLOCK_SIZE, set, way, 0,
-									      block[set][way].address<<LOG2_BLOCK_SIZE, WQ.entry[index].pf_metadata);
-                    if (cache_type == IS_LLC)
-		      {
-			cpu = writeback_cpu;
-			WQ.entry[index].pf_metadata =llc_prefetcher_cache_fill(WQ.entry[index].address<<LOG2_BLOCK_SIZE, set, way, 0,
-									       block[set][way].address<<LOG2_BLOCK_SIZE, WQ.entry[index].pf_metadata);
-			cpu = 0;
-		      }
-
-                    // update replacement policy
-                    if (cache_type == IS_LLC) {
-                        llc_update_replacement_state(writeback_cpu, set, way, WQ.entry[index].full_addr, WQ.entry[index].ip, block[set][way].full_addr, WQ.entry[index].type, 0);
-                    }
-                    else
-                        update_replacement_state(writeback_cpu, set, way, WQ.entry[index].full_addr, WQ.entry[index].ip, block[set][way].full_addr, WQ.entry[index].type, 0);
-
-                    // COLLECT STATS
-                    sim_miss[writeback_cpu][WQ.entry[index].type]++;
-                    sim_access[writeback_cpu][WQ.entry[index].type]++;
-
-                    fill_cache(set, way, &WQ.entry[index]);
-
-                    // mark dirty
-                    block[set][way].dirty = 1;
-
-                    // check fill level
-                    if (WQ.entry[index].fill_level < fill_level) {
-
-                        return_to_upper_level(WQ.entry[index]);
-                    }
-
-                    MISS[WQ.entry[index].type]++;
-                    ACCESS[WQ.entry[index].type]++;
-
-                    // remove this entry from WQ
-                    WQ.remove_queue(&WQ.entry[index]);
+                    handle_writeback_do_fill(writeback_cpu, index, set, way2);
                 }
             }
         }
     }
 }
-void CACHE::handle_read() {
-    // handle read
-
-    for (uint16_t i=0; i<MAX_READ; i++) {
-
-      uint16_t read_cpu = RQ.entry[RQ.head].cpu;
-      if (read_cpu == NUM_CPUS)
-      {
-        return;
-      }
-#ifdef BYPASS_DEBUG
-        if (RQ.entry[RQ.head].instr_id == 2001730) {
-            cout << NAME  << " Problem ID" << endl;
-        }
+bool CACHE::handle_read_miss_bypass(uint16_t read_cpu, int index, int mshr_index) {
+#if defined(BYPASS_L1D_OnNewMiss) || defined(BYPASS_L2_LOGIC) || defined(BYPASS_LLC_LOGIC)
+    if (warmup_complete[cpu] && (cache_type == IS_L1D || cache_type == IS_L2C || cache_type == IS_LLC)
+            && RQ.entry[index].type == LOAD && mshr_index == -1
+            && lower_level->RQ.SIZE > lower_level->RQ.occupancy) {
+        total_ByP_req[read_cpu]++;
+        ByP_req[read_cpu]++;
+    }
 #endif
-        // handle the oldest entry
+#ifdef BYPASS_L1D_OnNewMiss
+    if (warmup_complete[cpu] && cache_type == IS_L1D && RQ.entry[index].type == LOAD
+            && mshr_index == -1 && lower_level->RQ.SIZE > lower_level->RQ.occupancy
+            && l1d_bypass_operate(cpu, (CACHE*)this, (CACHE*)lower_level, (CACHE*)lower_level->lower_level)) {
+        RQ.entry[index].l1_bypassed = 1;
+        RQ.entry[index].fill_level = FILL_L2;
+        total_ByP_issued[read_cpu]++;
+        ByP_issued[read_cpu]++;
+        sim_byp_wByP[read_cpu]++;
+        sim_access_wByP[read_cpu]++;
+        lower_level->add_rq(&RQ.entry[index]);
+        return true;
+    }
+#endif
+#ifdef BYPASS_L2_LOGIC
+    if (warmup_complete[cpu] && cache_type == IS_L2C && RQ.entry[index].type == LOAD
+            && !RQ.entry[index].instruction && mshr_index == -1
+            && RQ.entry[index].l1_bypassed == 0
+            && lower_level->RQ.SIZE > lower_level->RQ.occupancy
+            && l2c_bypass_operate(cpu, (CACHE*)upper_level_dcache[cpu], (CACHE*)this, (CACHE*)lower_level)) {
+        RQ.entry[index].l2_bypassed = 1;
+        RQ.entry[index].fill_level = FILL_LLC;
+        total_ByP_issued[read_cpu]++;
+        ByP_issued[read_cpu]++;
+        sim_byp_wByP[read_cpu]++;
+        sim_access_wByP[read_cpu]++;
+        lower_level->add_rq(&RQ.entry[index]);
+        return true;
+    }
+#endif
+#ifdef BYPASS_LLC_LOGIC
+    if (warmup_complete[cpu] && cache_type == IS_LLC && RQ.entry[index].type == LOAD
+            && mshr_index == -1 && RQ.entry[index].l2_bypassed == 0
+            && lower_level->RQ.SIZE > lower_level->RQ.occupancy
+            && llc_bypass_operate(cpu, (CACHE*)lower_level->lower_level, (CACHE*)lower_level, (CACHE*)this)) {
+        RQ.entry[index].llc_bypassed = 1;
+        RQ.entry[index].fill_level = FILL_DRAM;
+        total_ByP_issued[read_cpu]++;
+        ByP_issued[read_cpu]++;
+        sim_byp_wByP[read_cpu]++;
+        sim_access_wByP[read_cpu]++;
+        lower_level->add_rq(&RQ.entry[index]);
+        return true;
+    }
+#endif
+    return false;
+}
+
+void CACHE::handle_read() {
+    for (uint16_t i=0; i<MAX_READ; i++) {
+        uint16_t read_cpu = RQ.entry[RQ.head].cpu;
+        if (read_cpu == NUM_CPUS)
+            return;
+
         if ((RQ.entry[RQ.head].event_cycle <= current_core_cycle[read_cpu]) && (RQ.occupancy > 0)) {
             int index = RQ.head;
-
-            // access cache
             uint32_t set = get_set(RQ.entry[index].address);
             int way = check_hit(&RQ.entry[index]);
 
             if (way >= 0) { // read hit
-
-                if (cache_type == IS_ITLB) {
-                    RQ.entry[index].instruction_pa = block[set][way].data;
-                    if (PROCESSED.occupancy < PROCESSED.SIZE){
-                        char* dst = (char*)&PROCESSED.entry[PROCESSED.tail];
-                        for (size_t i = 0; i < sizeof(PACKET); i += 64) {
-                            __builtin_prefetch(dst + i, 1, 3);
-                        }
-                        PROCESSED.add_queue(&RQ.entry[index]);
-                    } else {
-                        cerr << "ITLB PROCESSED FULL" << endl;
-                        assert(0&&"RETURN IS LOST FOREVER!!!! ");
-                    }
-                }
-                else if (cache_type == IS_DTLB) {
-                    RQ.entry[index].data_pa = block[set][way].data;
-                    if (PROCESSED.occupancy < PROCESSED.SIZE){
-                        char* dst = (char*)&PROCESSED.entry[PROCESSED.tail];
-                        for (size_t i = 0; i < sizeof(PACKET); i += 64) {
-                            __builtin_prefetch(dst + i, 1, 3);
-                        }
-                        PROCESSED.add_queue(&RQ.entry[index]);
-                    } else {
-                        cerr << "DTLB PROCESSED FULL" << endl;
-                        assert(0&&"RETURN IS LOST FOREVER!!!! ");
-                    }
-                }
-                else if (cache_type == IS_STLB)
-                    RQ.entry[index].data = block[set][way].data;
-                else if (cache_type == IS_L1I) {
-                    if (PROCESSED.occupancy < PROCESSED.SIZE){
-                        char* dst = (char*)&PROCESSED.entry[PROCESSED.tail];
-                        for (size_t i = 0; i < sizeof(PACKET); i += 64) {
-                            __builtin_prefetch(dst + i, 1, 3);
-                        }
-                        PROCESSED.add_queue(&RQ.entry[index]);
-                    } else {
-                        cerr << "L1I PROCESSED FULL" << endl;
-                        assert(0&&"RETURN IS LOST FOREVER!!!! ");
-                    }
-                }
-                //else if (cache_type == IS_L1D) {
-                else if ((cache_type == IS_L1D) && (RQ.entry[index].type != PREFETCH)) {
-                    if (PROCESSED.occupancy < PROCESSED.SIZE){
-                        char* dst = (char*)&PROCESSED.entry[PROCESSED.tail];
-                        for (size_t i = 0; i < sizeof(PACKET); i += 64) {
-                            __builtin_prefetch(dst + i, 1, 3);
-                        }
-                        PROCESSED.add_queue(&RQ.entry[index]);
-                        DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
-                        cout << "[" << NAME << "_RQ_PROCESSED] " << __func__ << " instr_id: " << RQ.entry[index].instr_id << " Read Hit ";
-                        cout << hex << " read: " << RQ.entry[index].address << dec;
-                        cout << " idx: " << MAX_READ;
-                        cout << " RQ ByP: " << (int) RQ.entry[index].l1_bypassed << " type: " << (int)RQ.entry[index].type  << endl; });
-                    } else {
-                        cerr << "L1D PROCESSED FULL" << endl;
-                        assert(0&&"RETURN IS LOST FOREVER!!!! ");
-                    }
-                }
-#ifdef  BYPASS_L1_LOGIC
-                else if ((cache_type == IS_L2C) && (RQ.entry[index].type == LOAD && RQ.entry[index].l1_bypassed == 1 && !RQ.entry[index].instruction)) {
-                    if (PROCESSED.occupancy < PROCESSED.SIZE){
-                        char* dst = (char*)&PROCESSED.entry[PROCESSED.tail];
-                        for (size_t i = 0; i < sizeof(PACKET); i += 64) {
-                            __builtin_prefetch(dst + i, 1, 3);
-                        }
-#ifdef BYPASS_DEBUG
-                        cout << " handle_read_hit: L2C to processed RQ ROB:" << RQ.entry[index].rob_index << "instrID: " << RQ.entry[index].instr_id << " addr: " << RQ.entry[index].address << endl;
-#endif
-
-                        // auto *l1d = (CACHE *) this->upper_level_dcache[cpu];
-                        // uint32_t set = l1d->get_set(RQ.entry[index].address);
-                        // uint32_t way = l1d->find_victim(cpu, RQ.entry[index].instr_id, set, l1d->block[set], RQ.entry[index].ip, RQ.entry[index].full_addr, RQ.entry[index].type);
-                        // l1d->PROCESSED.add_queue(&RQ.entry[index]);
-                        PROCESSED.add_queue(&RQ.entry[index]);
-                        DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
-                        cout << "[" << NAME << "_RQ_ByP_PROCESSED] " << __func__  << " Read Hit" << " instr_id: " << RQ.entry[index].instr_id ;
-                        dump_req(RQ.entry[index]);
-                            // cout << hex << " read: " << RQ.entry[index].address << dec;
-                        cout << " idx: " << MAX_READ;
-                        // cout << " RQ ByP: " << (int) RQ.entry[index].l1_bypassed << " type: " << (int)RQ.entry[index].type
-                        cout << endl; });
-                    } else {
-                        cerr << "L2C PROCESSED FULL" << endl;
-                        assert(0&&"RETURN IS LOST FOREVER!!!! ");
-                    }
-                }
-#endif
-#ifdef BYPASS_L2_LOGIC
-                else if ((cache_type == IS_LLC) && (RQ.entry[index].type == LOAD && RQ.entry[index].l2_bypassed == 1 && !RQ.entry[index].instruction)) {
-                    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
-                    cout << "[" << NAME << "_RQ_L2ByP_ret] " << __func__  << " L2 ByP Read Hit => L1D" << " instr_id: " << RQ.entry[index].instr_id ;
-                    dump_req(RQ.entry[index]);
-                    cout << endl; });
-                    upper_level_dcache[read_cpu]->upper_level_dcache[read_cpu]->return_data(&RQ.entry[index]);
-                }
-#endif
-
-                // update prefetcher on load instruction
-                if (RQ.entry[index].type == LOAD) {
-                    if (cache_type == IS_L1D)
-                        l1d_prefetcher_operate(RQ.entry[index].full_addr, RQ.entry[index].ip, 1, RQ.entry[index].type);
-                    else if (cache_type == IS_L2C)
-                        l2c_prefetcher_operate(block[set][way].address<<LOG2_BLOCK_SIZE, RQ.entry[index].ip, 1, RQ.entry[index].type, 0);
-                    else if (cache_type == IS_LLC)
-                    {
-                        cpu = read_cpu;
-                        llc_prefetcher_operate(block[set][way].address<<LOG2_BLOCK_SIZE, RQ.entry[index].ip, 1, RQ.entry[index].type, 0);
-                        cpu = 0;
-                    }
-                }
-
-                // update replacement policy
-                if (cache_type == IS_LLC) {
-                    llc_update_replacement_state(read_cpu, set, way, block[set][way].full_addr, RQ.entry[index].ip, 0, RQ.entry[index].type, 1);
-                }
-                else
-                    update_replacement_state(read_cpu, set, way, block[set][way].full_addr, RQ.entry[index].ip, 0, RQ.entry[index].type, 1);
-
-                // COLLECT STATS
-                sim_hit[read_cpu][RQ.entry[index].type]++;
-                sim_access[read_cpu][RQ.entry[index].type]++;
-                if (RQ.entry[index].type == LOAD) {
-                    sim_hit_wByP[read_cpu]++;
-                    sim_access_wByP[read_cpu]++;
-                }
-
-                // check fill level
-                if (RQ.entry[index].fill_level < fill_level) {
-
-                    return_to_upper_level(RQ.entry[index]);
-                }
-
-                // update prefetch stats and reset prefetch bit
-                if (block[set][way].prefetch) {
-                    pf_useful++;
-                    block[set][way].prefetch = 0;
-                }
-                block[set][way].used = 1;
-
-                HIT[RQ.entry[index].type]++;
-                ACCESS[RQ.entry[index].type]++;
-
-                // remove this entry from RQ
-                RQ.remove_queue(&RQ.entry[index]);
-                reads_available_this_cycle--;
+                handle_read_hit_processed(index, set, way);
+                handle_read_hit_bypass_return(read_cpu, index);
+                handle_read_hit_pf_operate(read_cpu, index, set, way);
+                handle_read_hit_replacement(read_cpu, index, set, way);
+                handle_read_hit_stats(read_cpu, index);
+                handle_read_hit_return(index);
+                handle_read_hit_pf_useful_and_remove(index, set, way);
             } else { // read miss
-                // check mshr
                 uint8_t miss_handled = 1;
                 int mshr_index = check_mshr(&RQ.entry[index]);
-                #if defined(BYPASS_L1D_OnNewMiss) || defined(BYPASS_L2_LOGIC) || defined(BYPASS_LLC_LOGIC)
-                if (warmup_complete[cpu] && (cache_type == IS_L1D || cache_type == IS_L2C || cache_type == IS_LLC) && RQ.entry[index].type == LOAD && mshr_index == -1 && lower_level->RQ.SIZE > lower_level->RQ.occupancy) {
-                    total_ByP_req[read_cpu]++;
-                    ByP_req[read_cpu]++;
-                }
-                #endif
-                #ifdef BYPASS_L1D_OnNewMiss
-                    if (warmup_complete[cpu] && cache_type == IS_L1D && RQ.entry[index].type == LOAD && mshr_index == -1 && lower_level->RQ.SIZE > lower_level->RQ.occupancy && l1d_bypass_operate(cpu, (CACHE*)this, (CACHE*)lower_level, (CACHE*)lower_level->lower_level)) {
-                        // if (warmup_complete[cpu]){
-                            DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
-                                    cout << "[" << NAME << "_L1_ByP] " << __func__;
-                                    cout << " ";
-                                    dump_req(RQ.entry[index]);
-                                    cout << endl;
-                                };);
-                            RQ.entry[index].l1_bypassed = 1;
-                            RQ.entry[index].fill_level = FILL_L2;
-                            total_ByP_issued[read_cpu]++;
-                            ByP_issued[read_cpu]++;
-                            sim_byp_wByP[read_cpu]++;
-                            sim_access_wByP[read_cpu]++;
-                            lower_level->add_rq(&RQ.entry[index]);
-                        // }
-                    } else
-                #endif
-                #ifdef BYPASS_L2_LOGIC
-                if (warmup_complete[cpu] && cache_type == IS_L2C && RQ.entry[index].type == LOAD && !RQ.entry[index].instruction && mshr_index == -1
-                    && RQ.entry[index].l1_bypassed == 0
-                    && lower_level->RQ.SIZE > lower_level->RQ.occupancy
-                    && l2c_bypass_operate(cpu, (CACHE*)upper_level_dcache[cpu], (CACHE*)this, (CACHE*)lower_level)) {
-                        DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
-                                cout << "[" << NAME << "_L2_ByP] " << __func__;
-                                cout << " ";
-                                dump_req(RQ.entry[index]);
-                                cout << endl;
-                            };);
-                        RQ.entry[index].l2_bypassed = 1;
-                        RQ.entry[index].fill_level = FILL_LLC;
-                        total_ByP_issued[read_cpu]++;
-                        ByP_issued[read_cpu]++;
-                        sim_byp_wByP[read_cpu]++;
-                        sim_access_wByP[read_cpu]++;
-                        lower_level->add_rq(&RQ.entry[index]);
-                } else
-                #endif
-                #ifdef BYPASS_LLC_LOGIC
-                if (warmup_complete[cpu] && cache_type == IS_LLC && RQ.entry[index].type == LOAD && mshr_index == -1
-                    && RQ.entry[index].l2_bypassed == 0
-                    && lower_level->RQ.SIZE > lower_level->RQ.occupancy
-                    && llc_bypass_operate(cpu, (CACHE*)lower_level->lower_level, (CACHE*)lower_level, (CACHE*)this)) {
-                        DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
-                                cout << "[" << NAME << "_LLC_ByP] " << __func__;
-                                cout << " ";
-                                dump_req(RQ.entry[index]);
-                                cout << endl;
-                            };);
-                        RQ.entry[index].llc_bypassed = 1;
-                        RQ.entry[index].fill_level = FILL_DRAM;
-                        total_ByP_issued[read_cpu]++;
-                        ByP_issued[read_cpu]++;
-                        sim_byp_wByP[read_cpu]++;
-                        sim_access_wByP[read_cpu]++;
-                        lower_level->add_rq(&RQ.entry[index]);
-                } else
-                #endif
-                if ((mshr_index == -1) && (MSHR.occupancy < MSHR_SIZE)) { // this is a new miss
-                    if(cache_type == IS_LLC){
-                        // check to make sure the DRAM RQ has room for this LLC read miss
-                        if (lower_level->get_occupancy(1, RQ.entry[index].address) == lower_level->get_size(1, RQ.entry[index].address)){
-                            miss_handled = 0;
-                        } else {
-                            add_mshr(&RQ.entry[index]);
-                            if(lower_level) {
-#ifdef BYPASS_DEBUG
-                                if (RQ.entry[index].instr_id == 2001730 || (uint64_t) RQ.entry[index].address == 1514623703326)
-                                    cout << " LLC MSHR ENTRY MADE, THIS IS THE PROBLEM PACKET RETURNED!!!!";
-#endif
-                                DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
-                                    cout << "[" << NAME << "_MSHR_NEW_MISS] " << __func__;
-                                    cout << " and lower request to RQ ";
-                                    dump_req(RQ.entry[index]);
-                                    cout << endl;
-                                };);
-                                lower_level->add_rq(&RQ.entry[index]);
-                            }
-                        }
-                    } else {
-                        // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL
-                        if (lower_level && lower_level->get_occupancy(1, RQ.entry[index].address) == lower_level->get_size(1, RQ.entry[index].address)) {
-                            miss_handled = 0;
-                        } else {
 
-                        // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL
-                        // add it to mshr (read miss)
-                            // it this is L2C and packet is bypass L1D we show details
-#ifdef BYPASS_DEBUG
-                            if (IS_L2C && RQ.entry[index].l1_bypassed == 1 && RQ.entry[index].type == LOAD) {
-                                cout << " RQ miss will add to MSHR instr_ID: " << RQ.entry[index].instr_id << " addr: " << RQ.entry[index].address << endl;
-                            }
-                            if (IS_L2C && RQ.entry[index].l1_bypassed == 1 && RQ.entry[index].type == LOAD && RQ.entry[index].instr_id == 2001730) {
-                                cout << " PROBLEM!!!! : " << RQ.entry[index].instr_id << " addr: " << RQ.entry[index].address << endl;
-                            }
-#endif
-
-                            add_mshr(&RQ.entry[index]);
-                            DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
-                                cout << "[" << NAME << "_MSHR_NEW_MISS] " << __func__;
-                                cout << " and lower request to RQ ";
-                                dump_req(RQ.entry[index]);
-                                cout << endl;
-                            };);
-                            // add it to the next level's read queue
-                            if (lower_level)
-                                lower_level->add_rq(&RQ.entry[index]);
-                            else { // this is the last level
-                                if (cache_type == IS_STLB) {
-                                    // TODO: need to differentiate page table walk and actual swap
-                                    // emulate page table walk
-                                    uint64_t pa = va_to_pa(read_cpu, RQ.entry[index].instr_id, RQ.entry[index].full_addr, RQ.entry[index].address);
-
-                                    RQ.entry[index].data = pa >> LOG2_PAGE_SIZE;
-                                    RQ.entry[index].event_cycle = current_core_cycle[read_cpu];
-                                    return_data(&RQ.entry[index]);
-                                }
-                            }
-                        }
-                    }
+                if (handle_read_miss_bypass(read_cpu, index, mshr_index)) {
+                    // bypass taken — packet forwarded downstream, no MSHR insertion
+                } else if ((mshr_index == -1) && (MSHR.occupancy < MSHR_SIZE)) {
+                    if (cache_type == IS_LLC)
+                        handle_read_miss_new_llc(index, miss_handled);
+                    else
+                        handle_read_miss_new_other(read_cpu, index, miss_handled);
+                } else if ((mshr_index == -1) && (MSHR.occupancy == MSHR_SIZE)) {
+                    handle_read_miss_mshr_full(index, miss_handled);
+                } else if (mshr_index != -1) {
+                    handle_read_miss_inflight_merge_deps(index, mshr_index);
+                    handle_read_miss_inflight_fill_level(index, mshr_index);
+                    handle_read_miss_inflight_bypass_l1_mismatch(index, mshr_index);
+                    handle_read_miss_inflight_bypass_l2_mismatch(index, mshr_index);
+                    if (MSHR.entry[mshr_index].type == PREFETCH)
+                        handle_read_miss_inflight_prefetch_takeover(index, mshr_index);
+                    else
+                        handle_read_miss_inflight_non_prefetch_merge(index, mshr_index);
+                    MSHR_MERGED[RQ.entry[index].type]++;
                 } else {
-                    if ((mshr_index == -1) && (MSHR.occupancy == MSHR_SIZE)) { // not enough MSHR resource
-                        // cannot handle miss request until one of MSHRs is available
-                        miss_handled = 0;
-                        STALL[RQ.entry[index].type]++;
-                    }
-                    else if (mshr_index != -1) { // already in-flight miss
-#ifdef BYPASS_DEBUG
-                        if (RQ.entry[index].l1_bypassed == 1 && RQ.entry[index].type != LOAD) {
-                            cerr << NAME << " Type: " << RQ.entry[index].type << " addr: " << RQ.entry[index].address << "instrID: " << RQ.entry[index].instr_id << " ROB: " << RQ.entry[index].rob_index << endl;
-                            assert(0&&"NOT EXPECTED NON LOAD BYPASS MERGE ... ");
-                        }
-                        if (RQ.entry[index].l1_bypassed == 1 && RQ.entry[index].type == LOAD) {
-                            cerr << NAME << " MERGING BYPASSED RQ into existing MSHR: " << NAME << RQ.entry[index].type << " addr: " << RQ.entry[index].address << "instrID: " << RQ.entry[index].instr_id << " ROB: " << RQ.entry[index].rob_index << endl;
-                        }
-#endif
-                        DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
-                            cout << "[" << NAME << "_MSHR_MERGING] " << __func__;
-                            cout << " RQ ";
-                            dump_req(RQ.entry[index]);
-                            cout << " MSHR ";
-                            dump_req(MSHR.entry[mshr_index]);
-                            cout << endl;
-                        };);
-                        // mark merged consumer
-                        if (RQ.entry[index].type == RFO) {
-                            if (RQ.entry[index].l1_bypassed)
-                                assert(0&&"RFO BYPASS NOT EXPECTED ... ");
-                            if (RQ.entry[index].tlb_access) {
-                                uint16_t sq_index = RQ.entry[index].sq_index;
-                                MSHR.entry[mshr_index].store_merged = 1;
-                                MSHR.entry[mshr_index].sq_index_depend_on_me.insert (sq_index);
-				                MSHR.entry[mshr_index].sq_index_depend_on_me.join (RQ.entry[index].sq_index_depend_on_me, SQ_SIZE);
-                            }
-                            if (RQ.entry[index].load_merged) {
-                                //uint32_t lq_index = RQ.entry[index].lq_index;
-                                MSHR.entry[mshr_index].load_merged = 1;
-                                //MSHR.entry[mshr_index].lq_index_depend_on_me[lq_index] = 1;
-				                MSHR.entry[mshr_index].lq_index_depend_on_me.join (RQ.entry[index].lq_index_depend_on_me, LQ_SIZE);
-                            }
-                        } else {
-                            if (RQ.entry[index].instruction) {
-#ifdef BYPASS_DEBUG
-                                if (RQ.entry[index].l1_bypassed == 1) {
-                                    cerr << " THIS IS WRONG, WHY ByP INSTR??? " << NAME << RQ.entry[index].type << " addr: " << RQ.entry[index].address << "instrID: " << RQ.entry[index].instr_id << " ROB: " << RQ.entry[index].rob_index << endl;
-                                }
-#endif
-
-                                uint16_t rob_index = RQ.entry[index].rob_index;
-                                MSHR.entry[mshr_index].instr_merged = 1;
-                                MSHR.entry[mshr_index].rob_index_depend_on_me.insert (rob_index);
-
-                                if (RQ.entry[index].instr_merged) {
-				                    MSHR.entry[mshr_index].rob_index_depend_on_me.join (RQ.entry[index].rob_index_depend_on_me, ROB_SIZE);
-                                }
-                            } else {
-#ifdef BYPASS_DEBUG
-                                if (RQ.entry[index].l1_bypassed == 1) {
-                                    cout << " NOW ByP data RQ " << "LQ" << RQ.entry[index].lq_index << "SQ" << RQ.entry[index].sq_index<< "merging with MSHR " << NAME << RQ.entry[index].type << " addr: " << RQ.entry[index].address << "instrID: " << RQ.entry[index].instr_id << " ROB: " << RQ.entry[index].rob_index << endl;
-                                }
-#endif
-
-                                uint16_t lq_index = RQ.entry[index].lq_index;
-
-                                MSHR.entry[mshr_index].load_merged = 1;
-                                MSHR.entry[mshr_index].lq_index_depend_on_me.insert (lq_index);
-
-                                MSHR.entry[mshr_index].lq_index_depend_on_me.join (RQ.entry[index].lq_index_depend_on_me, LQ_SIZE);
-                                if (RQ.entry[index].store_merged) {
-#ifdef BYPASS_DEBUG
-                                    if (RQ.entry[index].l1_bypassed == 1) {
-                                        cout << " ByP HAS merged store " << NAME << RQ.entry[index].type << " addr: " << RQ.entry[index].address << "instrID: " << RQ.entry[index].instr_id << " ROB: " << RQ.entry[index].rob_index << endl;
-                                    }
-#endif
-
-                                    MSHR.entry[mshr_index].store_merged = 1;
-				                    MSHR.entry[mshr_index].sq_index_depend_on_me.join (RQ.entry[index].sq_index_depend_on_me, SQ_SIZE);
-                                }
-                            }
-                            DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
-                                cout << "[" << NAME << "_MSHR_POST_MERGE] " << __func__;
-                                dump_req(MSHR.entry[mshr_index]);
-                                cout <<  endl;
-
-                            };);
-                        }
-
-                        // update fill_level
-                        if (RQ.entry[index].fill_level < MSHR.entry[mshr_index].fill_level) {
-#ifdef BYPASS_DEBUG
-                            if (RQ.entry[index].l1_bypassed == 1 || MSHR.entry[mshr_index].l1_bypassed == 1) {
-                                cout << "Updating ByP fill lvl: " << "rq instrID: " << RQ.entry[index].instr_id << "RQ: " << RQ.entry[index].fill_level << " MSHR: " <<  MSHR.entry[mshr_index].fill_level << " Mtype: " << MSHR.entry[mshr_index].type << endl;
-                            }
-#endif
-                            MSHR.entry[mshr_index].fill_level = RQ.entry[index].fill_level;
-
-                        }
-#ifdef BYPASS_L1_LOGIC
-                        // Reset ByP if mismatch — non-bypass path will handle deps at fill time
-                        if (cache_type == IS_L2C) {
-                            if (RQ.entry[index].l1_bypassed != MSHR.entry[mshr_index].l1_bypassed) {
-                                //  RQ.entry[index].l1_bypassed = 0;
-                                // MSHR.entry[mshr_index].fill_level = 1;
-                                if (MSHR.entry[mshr_index].type != PREFETCH) {
-                                    // Push bypass LQ(s) directly to L1D MSHR (only if L1D has one)
-                                    auto *l1d = (CACHE *) this->upper_level_dcache[cpu];
-                                    bool found_l1d_mshr = false;
-                                    for (uint16_t m = 0; m < l1d->MSHR_SIZE; m++) {
-                                        if (l1d->MSHR.entry[m].address == MSHR.entry[mshr_index].address) {
-                                            found_l1d_mshr = true;
-                                            l1d->MSHR.entry[m].load_merged = 1;
-                                            l1d->MSHR.entry[m].lq_index_depend_on_me.insert(
-                                                RQ.entry[index].lq_index);
-                                            if (RQ.entry[index].load_merged) {
-                                                ITERATE_SET(dep, RQ.entry[index].lq_index_depend_on_me, LQ_SIZE) {
-                                                    l1d->MSHR.entry[m].lq_index_depend_on_me.insert(dep);
-                                                }
-                                            }
-                                            DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[l1d->MSHR.cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
-                                                cout << "[" << NAME << "_MSHR_POST_MERGE] " << __func__;
-                                                cout << " before rm l1d->MSHR.entry.lq_index: " << l1d->MSHR.entry[m].lq_index;
-                                                dump_req(l1d->MSHR.entry[m]);
-                                                cout << endl;
-                                            };);
-                                            l1d->MSHR.entry[m].lq_index_depend_on_me.remove(
-                                                l1d->MSHR.entry[m].lq_index);
-                                            DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[l1d->MSHR.cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
-                                                cout << "[" << NAME << "_MSHR_POST_MERGE] " << __func__;
-                                                cout << " after rm l1d->MSHR.entry.lq_index: " << l1d->MSHR.entry[m].lq_index;
-                                                dump_req(l1d->MSHR.entry[m]);
-                                                cout << endl;
-
-                                            };);
-                                            break;
-                                        }
-                                    }
-                                    if (found_l1d_mshr) {
-                                        // L1D has MSHR — safe to redirect fill through L1D
-                                        RQ.entry[index].l1_bypassed = 0;
-                                        MSHR.entry[mshr_index].l1_bypassed = 0;
-                                        MSHR.entry[mshr_index].fill_level = 1;
-                                    }
-                                    // else: L1D has no MSHR (was bypassed). Keep l1_bypassed=1
-                                    // so packet completes via L2C.PROCESSED → CPU.
-                                } else if (MSHR.entry[mshr_index].fill_level < fill_level) {
-                                    // PREFETCH propagating to L1D → L1D has prefetch MSHR
-                                    // Use normal return path, not bypass
-                                    RQ.entry[index].l1_bypassed = 0;
-                                }
-
-                                // // === FIX: push bypass LQ deps into L1D MSHR now ===
-                                // auto *l1d = (CACHE *) this->upper_level_dcache[cpu];
-                                // int l1d_mshr = l1d->check_mshr(&MSHR.entry[mshr_index]); // same addr, L1D MSHR alive
-                                // if (l1d_mshr != -1) {
-                                //     l1d->MSHR.entry[l1d_mshr].load_merged = 1;
-                                //     l1d->MSHR.entry[l1d_mshr].lq_index_depend_on_me.join(
-                                //         RQ.entry[index].lq_index_depend_on_me, LQ_SIZE);
-                                //     // RQ entry has the bypassed instr's LQ index + any merges it accumulated
-                                //     l1d->MSHR.entry[l1d_mshr].lq_index_depend_on_me.insert(
-                                //         RQ.entry[index].lq_index);
-                                // }
-                                DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")){
-                                    cout << "["<< NAME << "ByP MISMATCH] " << __func__;
-                                     cout << " RQ";
-                                     dump_req(RQ.entry[index]);
-                                     cout << " MSHR";
-                                     dump_req(MSHR.entry[mshr_index]);
-                                     cout << endl;});
-#ifdef DEBUG_PRINT
-                                // cout << "LQ IS LOCATED THERE???? 101: " << MSHR.entry[mshr_index].lq_index_depend_on_me.search(101);
-#endif
-                            } else {
-                                DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
-                                    cout << "["<< NAME << " ByP NOT mismatch] " << __func__;
-                                    cout << " RQ";
-                                    dump_req(RQ.entry[index]);
-                                    cout << " MSHR";
-                                    dump_req(MSHR.entry[mshr_index]);
-                                    cout << endl;});
-                            }
-                        }
-#endif
-#ifdef BYPASS_L2_LOGIC
-                        // Reset L2 ByP if mismatch at LLC
-                        if (cache_type == IS_LLC) {
-                            if (RQ.entry[index].l2_bypassed != MSHR.entry[mshr_index].l2_bypassed) {
-                                if (MSHR.entry[mshr_index].type != PREFETCH) {
-                                    // Push bypass LQ(s) directly to L2C MSHR
-                                    auto *l2c = (CACHE *) this->upper_level_dcache[cpu];
-                                    bool found_l2c_mshr = false;
-                                    for (uint16_t m = 0; m < l2c->MSHR_SIZE; m++) {
-                                        if (l2c->MSHR.entry[m].address == MSHR.entry[mshr_index].address) {
-                                            found_l2c_mshr = true;
-                                            l2c->MSHR.entry[m].load_merged = 1;
-                                            l2c->MSHR.entry[m].lq_index_depend_on_me.insert(
-                                                RQ.entry[index].lq_index);
-                                            if (RQ.entry[index].load_merged) {
-                                                ITERATE_SET(dep, RQ.entry[index].lq_index_depend_on_me, LQ_SIZE) {
-                                                    l2c->MSHR.entry[m].lq_index_depend_on_me.insert(dep);
-                                                }
-                                            }
-                                            l2c->MSHR.entry[m].lq_index_depend_on_me.remove(
-                                                l2c->MSHR.entry[m].lq_index);
-                                            break;
-                                        }
-                                    }
-                                    if (found_l2c_mshr) {
-                                        // L2C has MSHR — safe to redirect fill through L2C
-                                        RQ.entry[index].l2_bypassed = 0;
-                                        MSHR.entry[mshr_index].l2_bypassed = 0;
-                                        MSHR.entry[mshr_index].fill_level = FILL_L2;
-                                    }
-                                    // else: L2C has no MSHR (was bypassed). Keep l2_bypassed=1
-                                    // so packet completes via LLC bypass return → L1D.
-                                } else if (MSHR.entry[mshr_index].fill_level < fill_level) {
-                                    RQ.entry[index].l2_bypassed = 0;
-                                }
-                                DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")){
-                                    cout << "["<< NAME << " L2 ByP MISMATCH] " << __func__;
-                                     cout << " RQ";
-                                     dump_req(RQ.entry[index]);
-                                     cout << " MSHR";
-                                     dump_req(MSHR.entry[mshr_index]);
-                                     cout << endl;});
-                            }
-                        }
-#endif
-
-                        // update request
-                        if (MSHR.entry[mshr_index].type == PREFETCH) {
-                            // RBERA: add late prefetch stats here
-                            pf_late++;
-                            merge_with_prefetch(MSHR.entry[mshr_index], RQ.entry[index]);
-#ifdef BYPASS_L1_LOGIC
-                            // merge_with_prefetch restores PREFETCH's bypass=0,
-                            // but the LOAD taking over may be bypassed. Restore LOAD's flag.
-                            if (RQ.entry[index].l1_bypassed)
-                                MSHR.entry[mshr_index].l1_bypassed = 1;
-#endif
-#ifdef BYPASS_L2_LOGIC
-                            if (RQ.entry[index].l2_bypassed)
-                                MSHR.entry[mshr_index].l2_bypassed = 1;
-#endif
-#ifdef BYPASS_LLC_LOGIC
-                            if (RQ.entry[index].llc_bypassed)
-                                MSHR.entry[mshr_index].llc_bypassed = 1;
-#endif
-                            // uint8_t  prior_returned = MSHR.entry[mshr_index].returned;
-                            // uint64_t prior_event_cycle = MSHR.entry[mshr_index].event_cycle;
-                            // MSHR.entry[mshr_index] = RQ.entry[index];
-                            // // in case request is already returned, we should keep event_cycle and retunred variables
-                            // MSHR.entry[mshr_index].returned = prior_returned;
-                            // MSHR.entry[mshr_index].event_cycle = prior_event_cycle;
-                        } else {
-                            if (RQ.entry[index].instruction) {
-                                MSHR.entry[mshr_index].rob_index_depend_on_me.insert(RQ.entry[index].rob_index);
-                                MSHR.entry[mshr_index].instr_merged = 1;
-                            } else if (RQ.entry[index].type == LOAD) {
-                                MSHR.entry[mshr_index].lq_index_depend_on_me.insert(RQ.entry[index].lq_index);
-                                MSHR.entry[mshr_index].load_merged = 1;
-                            } else if (RQ.entry[index].type == RFO) {
-                                MSHR.entry[mshr_index].sq_index_depend_on_me.insert(RQ.entry[index].sq_index);
-                                MSHR.entry[mshr_index].store_merged = 1;
-                            }
-                        }
-                        MSHR_MERGED[RQ.entry[index].type]++;
-                    }
-                    else { // WE SHOULD NOT REACH HERE
-                        cerr << "[" << NAME << "] MSHR errors" << endl;
-                        assert(0);
-                    }
+                    cerr << "[" << NAME << "] MSHR errors" << endl;
+                    assert(0);
                 }
 
                 if (miss_handled) {
-                    // update prefetcher on load instruction
-		            if (RQ.entry[index].type == LOAD) {
-                        if (cache_type == IS_L1D)
-                            l1d_prefetcher_operate(RQ.entry[index].full_addr, RQ.entry[index].ip, 0, RQ.entry[index].type);
-                        if (cache_type == IS_L2C)
-			                l2c_prefetcher_operate(RQ.entry[index].address<<LOG2_BLOCK_SIZE, RQ.entry[index].ip, 0, RQ.entry[index].type, 0);
-                        if (cache_type == IS_LLC){
-            			    cpu = read_cpu;
-			                llc_prefetcher_operate(RQ.entry[index].address<<LOG2_BLOCK_SIZE, RQ.entry[index].ip, 0, RQ.entry[index].type, 0);
-                            cpu = 0;
-                        }
-                    }
-                    MISS[RQ.entry[index].type]++;
-                    ACCESS[RQ.entry[index].type]++;
-                    // remove this entry from RQ
-                    RQ.remove_queue(&RQ.entry[index]);
-		            reads_available_this_cycle--;
+                    handle_read_miss_handled_pf_operate(read_cpu, index);
+                    handle_read_miss_handled_stats_remove(index);
                 }
             }
         } else {
-            // cerr << "No read requests to handle or read request not ready!" << endl;
             return;
         }
-	    if(reads_available_this_cycle == 0){
-	        return;
-	    }
+        if (reads_available_this_cycle == 0)
+            return;
     }
 }
 
