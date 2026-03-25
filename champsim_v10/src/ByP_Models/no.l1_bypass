@@ -3,15 +3,15 @@
 
 // USEFUL VARS:  usage example
 //  * Cached metrics available without sim_access:
-//  *   lpm[cpu][IS_L1D].c_amat_val   ← ω(L1D)/α(L1D)
-//  *   lpm[cpu][IS_L1D].apc_val      ← α(L1D)/ω(L1D)
-//  *   lpm[cpu][IS_L1D].lpmr_val     ← ω(L1D)/(IC×CPIexe)
-//  *   lpm[cpu][IS_L2C].mu()         ← miss-cycle fraction
-//  *   lpm[cpu][IS_L2C].kappa()      ← pure-miss fraction
+//  *   lpm[cpu][IS_L1D].camat_activeMemCyDivAccesses_ratio   ← ω(L1D)/α(L1D)
+//  *   lpm[cpu][IS_L1D].apc_accessesDivActiveMemCy_ratio      ← α(L1D)/ω(L1D)
+//  *   lpm[cpu][IS_L1D].lpmr_activeMemCyDivIdealCy_ratio     ← ω(L1D)/(IC×CPIexe)
+//  *   lpm[cpu][IS_L2C].µ_sumMissOverlapCyDivMemActiveCy_ratio()         ← miss-cycle fraction
+//  *   lpm[cpu][IS_L2C].κ_pureMissCyDivSumMissOverlapCy_ratio()      ← pure-miss fraction
 //  *
 //  * Also raw counters:
 //  *   lpm[cpu][IS_L1D].h, .m, .x, .e
-//  *   lpm[cpu][IS_L1D].omega()
+//  *   lpm[cpu][IS_L1D].ω_numMemActiveCy()
 
 // L1D->MSHR.occupancy      L1D->MSHR.SIZE
 // L1D->RQ.occupancy        L1D->RQ.SIZE

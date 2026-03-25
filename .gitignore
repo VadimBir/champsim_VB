@@ -6,6 +6,7 @@ traces/*
 
 
 *.csv*
+*.data*
 *.log
 *.tar
 *aocc*.tar

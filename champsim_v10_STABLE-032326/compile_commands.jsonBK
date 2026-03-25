@@ -1,0 +1,7 @@
+[
+  {
+    "directory": "./champsim_v7_ByP/prefetchert",
+    "command": "clang -std=c++20 -x c++ -Iinclude -Dwhatever -c prefetcher/ipcp.llc_pref",
+    "file": "prefetcher/ipcp.llc_pref"
+  }
+]

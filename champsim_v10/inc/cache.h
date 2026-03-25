@@ -57,11 +57,21 @@ class CACHE : public MEMORY {
              roi_miss[NUM_CPUS][NUM_TYPES];
 
     uint64_t total_miss_latency;
+
+    // Bypass-aware load counters (parallel to sim_*, adds bypass as 3rd category)
+    // wByP = "with Bypass": access = hit + miss + bypassed
+    uint64_t sim_access_wByP[NUM_CPUS];   // sim_access[cpu][LOAD] + ByP_issued
+    uint64_t sim_hit_wByP[NUM_CPUS];      // same as sim_hit[cpu][LOAD]
+    uint64_t sim_miss_wByP[NUM_CPUS];     // same as sim_miss[cpu][LOAD]
+    uint64_t sim_byp_wByP[NUM_CPUS];      // = total_ByP_issued (duplicated for clean accounting)
+
 // VB: CCUSTOM CODE START
-    uint64_t total_ByP_cnt;
-    uint64_t total_L1_ByP_cnt = 0;
-    uint64_t total_L2_ByP_cnt = 0;
-    uint64_t total_LLC_ByP_cnt = 0;
+    // Cumulative post-warmup (for final stats, reset at warmup like sim_miss)
+    uint64_t total_ByP_issued[NUM_CPUS];  // bypass model said yes
+    uint64_t total_ByP_req[NUM_CPUS];     // bypass eligible (new miss + room)
+    // Interval (for heartbeat, reset after each heartbeat print)
+    uint64_t ByP_issued[NUM_CPUS];
+    uint64_t ByP_req[NUM_CPUS];
     bool FORCE_ALL_HITS; // VB CUSTOM
     uint8_t is_bypassing = 0;   // bit0=L1 bit1=L2 bit2=LLC
 
@@ -138,21 +148,29 @@ class CACHE : public MEMORY {
             }
         }
 
-	total_miss_latency = 0;
-    total_ByP_cnt = 0;
+        total_miss_latency = 0;
+        for (uint32_t i=0; i<NUM_CPUS; i++) {
+            total_ByP_issued[i] = 0;
+            total_ByP_req[i] = 0;
+            ByP_issued[i] = 0;
+            ByP_req[i] = 0;
+            sim_access_wByP[i] = 0;
+            sim_hit_wByP[i] = 0;
+            sim_miss_wByP[i] = 0;
+            sim_byp_wByP[i] = 0;
+        }
+            lower_level = NULL;
+            extra_interface = NULL;
+            fill_level = -1;
+            MAX_READ = 1;
+            MAX_FILL = 1;
 
-        lower_level = NULL;
-        extra_interface = NULL;
-        fill_level = -1;
-        MAX_READ = 1;
-        MAX_FILL = 1;
-
-        pf_requested = 0;
-        pf_issued = 0;
-        pf_useful = 0;
-        pf_useless = 0;
-        pf_late = 0;
-        pf_fill = 0;
+            pf_requested = 0;
+            pf_issued = 0;
+            pf_useful = 0;
+            pf_useless = 0;
+            pf_late = 0;
+            pf_fill = 0;
     };
 
     // destructor
@@ -219,6 +237,13 @@ class CACHE : public MEMORY {
 
     void prefetcher_feedback(uint64_t &pref_gen, uint64_t &pref_fill, uint64_t &pref_used, uint64_t &pref_late);
     
+    inline void return_to_upper_level(PACKET& packet) {
+        if (packet.instruction)
+            upper_level_icache[packet.cpu]->return_data(&packet);
+        else
+            upper_level_dcache[packet.cpu]->return_data(&packet);
+    }
+
     uint32_t get_set(uint64_t address),
              get_way(uint64_t address, uint32_t set),
              find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type),

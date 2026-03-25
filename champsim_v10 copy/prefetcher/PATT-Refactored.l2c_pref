@@ -1,0 +1,682 @@
+#include "cache.h"
+#include <map>
+#include <unordered_map>
+#include <vector>
+#include <utility>
+#include <algorithm>
+#include <numeric>
+#include <list>
+#include <cstdint>
+#include <unordered_set>
+#include <iomanip>
+#include <string>
+
+using namespace std;
+
+// Global variables - EXACT as original
+unordered_map<int, int> prefetcher_count;
+unordered_map<int, bool> isPfActive;
+unordered_map<int, int> number_of_inRowPfInactivity;
+double entryFrequency = 0;
+int new_entry_count = 0;
+int pf_cnt = 0;
+uint64_t NUM_CACHELINES = 0;
+uint64_t pre_previous_addr = 0;
+uint64_t previous_addr = 0;
+uint64_t pf_addr = 0;
+int64_t cnt = 0;
+vector<uint8_t> debugger = {};
+int MSHR_win_cnt = 0;
+int print_cnt = 0;
+double nxtH = 0;
+unordered_map<int,int> nxtH_cnt;
+unordered_map<int,double> pf_nxtH_acc;
+int flagged = 0;
+unordered_map<int,int> pf_guess_cnt;
+int tH_cnt = 0;
+vector<pair<uint64_t, int>> currentRound_prefetches;
+double nxtAddrHit_IP_Stride_avg = 0;
+int nxtAddrHit_IP_Stride_avg_cnt = 0;
+unordered_map<int,double> pf_nxtH_acc_avg;
+unordered_map<int,int> pf_nxtH_acc_cnt;
+uint64_t preIP = 0;
+
+#define IP_TRACKER_COUNT 256
+#define PREFETCH_DEGREE 15
+#define IPSTR_ID 0
+#define WINDOW 512
+
+// Simplified access data structure - only current access info
+struct AccessData {
+    // Current access
+    uint64_t addr;
+    uint64_t ip;
+    uint64_t block;
+    uint64_t page;
+    int64_t block2page;
+    int64_t delta_ip;               // Delta = prev - current access to show the change
+    int64_t delta_page;             // Delta = prev - current access to show the change
+    int64_t delta_block;            // Delta = prev - current access to show the change
+    bool is_filled = false;
+    
+    AccessData() : addr(0), ip(0), block(0), page(0), block2page(0) {}
+    
+    void init_process_access(uint64_t new_addr, uint64_t new_ip) {
+        addr = new_addr;
+        ip = new_ip;
+        block = addr; 
+        page = addr >> 12;
+        
+        // Calculate block number relative to page start
+        uint64_t page_start_block = page << (12 - LOG2_BLOCK_SIZE);
+        block2page = block - page_start_block;
+        is_filled = true;
+    }
+    // void individual_process_access(AccessData& prev_access_data) {
+    //     delta_ip = (int64_t)(prev_access_data.ip) - (int64_t)(ip);
+    //     delta_page = (int64_t)(prev_access_data.page) - (int64_t)(page);
+    //     delta_block = (int64_t)(prev_access_data.block) - (int64_t)(block);
+    // }
+        
+    
+    int64_t get_key(const string& name,  AccessData& prev_access_data) const {
+        if (name == "addr") return addr;
+        if (name == "block") return block;
+        if (name == "block2page") return block2page;
+        if (name == "ip") return ip;
+        if (name == "delta_ip") return (int64_t)(prev_access_data.ip)-(int64_t)(ip);
+        if (name == "pre_delta_ip") return (int64_t)(prev_access_data.delta_ip); 
+        if (name == "page") return page;
+        if (name == "delta_page") return (int64_t)(prev_access_data.page)-(int64_t)(page);
+        return 0;
+    }
+    int64_t get_value(const string& name, AccessData& prev_access_data) const {
+        if (name == "addr") return addr;
+        if (name == "block2page") return block2page;
+        if (name == "block") return block;
+        if (name == "delta_block") return (int64_t)(prev_access_data.block)-(int64_t)(block);
+
+        
+        // 
+        return 0;
+    }
+};
+
+// Single shared AccessData instance
+AccessData shared_access_data;
+
+// Config struct with string-based tracking
+struct MT_Config {
+    int lru_size = 0;
+    int tracking_max = 0; 
+    int tracking_min = 0;
+    int percent_threshold = 0;
+    int prefetcher_id = 0;
+    string tracking_key = "ip";
+    string tracking_value = "delta_block";
+};
+
+// Config instances
+MT_Config mt1_config;
+MT_Config mt2_config;
+MT_Config mt3_config;
+MT_Config mt4_config;
+
+class IDMM {
+public:
+    AccessData prev_access_data; // used for table training. Previous Key: Current Value. This MUST be instance specific
+    int64_t training_key = 0;
+    int64_t training_value = 0;
+    int64_t prediction_key = 0;
+    IDMM() : markov_LRU_front(0), pf_addr(0), config_ptr(nullptr), MT_limit(0) {}
+    
+    void set_config(const MT_Config* cfg) {
+        config_ptr = cfg;
+        MT_limit = cfg->lru_size;
+        markov_LRU.clear();
+        markov_LRU.reserve(MT_limit);
+    }
+
+    // 3-phase operation: Extract patterns -> Train transitions -> Predict next accesses
+    vector<int64_t> operate(const AccessData& access_data, uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type) {
+        // 0. process new data's delta relative to previous data 
+        // access_data.individual_process_access(prev_access_data);
+
+        // 1. Get key and value based on per MT config 
+        prediction_key = access_data.get_key(config_ptr->tracking_key, prev_access_data);
+        training_key = prev_access_data.get_key(config_ptr->tracking_key, prev_access_data); // during training this comes from previous access (which initially is NON but compiler is fine) if issue, must have a check
+        // training_value = (int64_t)prev_access_data.block-(int64_t)access_data.block;      
+        training_value = access_data.get_value(config_ptr->tracking_value, prev_access_data); 
+             
+        
+        // 2. Update the markov table
+        IteratorType key_it;
+        unordered_map<int64_t, int>::iterator val_it;
+            // Range-based training filter: only train on meaningful spatial displacements
+            if ((abs(training_value) >= config_ptr->tracking_min && abs(training_value) <= config_ptr->tracking_max)){
+                if (training_value != -1 && training_value != -2 && training_value != -4) {
+                    markov_table[training_key][training_value]++;
+                }
+            }
+
+            key_it = markov_table.find(training_key);
+            if ((abs(training_value) >= config_ptr->tracking_min && abs(training_value) <= config_ptr->tracking_max)) {
+                if (training_value != -1 && training_value != -2 && training_value != -4) {
+                    val_it = key_it->second.find(training_value);
+                }
+            }
+
+        // 3. Predict next access based on table
+        vector<int64_t> pf_topP = markov_prefetcher(prediction_key, key_it, val_it);
+
+
+        // Update instance state which is required for 2. Key(Prev access):Value(Current access) 
+        prev_access_data = access_data;
+        
+        return pf_topP;
+    }
+
+private:
+    unordered_map<int64_t, unordered_map<int64_t, int>> markov_table;
+    using IteratorType = unordered_map<int64_t, unordered_map<int64_t, int>>::iterator;
+    vector<unordered_map<int64_t, int>::iterator> markov_LRU;
+    int markov_LRU_front;
+    uint64_t pf_addr;
+    
+    const MT_Config* config_ptr;
+    int MT_limit;
+
+    // Iterator-based LRU eviction: returns iterator to least recently used VALUE
+    unordered_map<int64_t, int>::iterator markov_evict_lru() {                          // evict the least recently used value
+        if (markov_LRU.empty()) return markov_table.begin()->second.end();              // if LRU is empty, return end iterator
+        unordered_map<int64_t, int>::iterator val_it = markov_LRU[0];                   // get the least recently used value's iterator
+        for (int i = 1; i < markov_LRU_front && i < (int)markov_LRU.size(); i++) {      // shift the LRU
+            markov_LRU[i - 1] = markov_LRU[i];      
+        }
+        return val_it;                                                                  // Return victim iterator for table deletion (Specifically )
+    }
+
+    // move the value to the front of the LRU       
+    void markov_update_lru(int index) {
+        if (index >= markov_LRU.size() || markov_LRU_front <= 0) return;                        // if index is out of bounds or LRU is empty, return
+        auto tmpVal = markov_LRU[index];                                                        // store the value to be moved
+        for (int i = index; i < markov_LRU_front - 1 && i < (int)markov_LRU.size() - 1; i++) {  // shift the LRU
+            markov_LRU[i] = markov_LRU[i + 1];                                                  
+        }
+        if (markov_LRU_front > 0) {                                                             // if LRU has active elements, place at MRU position                        
+            markov_LRU[markov_LRU_front - 1] = tmpVal;
+        }
+    }
+
+    vector<int64_t> markov_prefetcher(int64_t lookup_key, IteratorType key_it, unordered_map<int64_t, int>::iterator val_it) {
+        vector<int64_t> top_predictions; // init Pf collector
+
+        auto it = markov_table.find(lookup_key);                                            // find the key in the table
+        if (it != markov_table.end()) {                                                     // if key is found
+            auto &next_blocks = it->second;    
+            vector<pair<int64_t, int>> predictions(next_blocks.begin(), next_blocks.end()); // convert {Search Key: Value : Count} into vector with [Value:Count] for a given key
+            sort(predictions.begin(), predictions.end(),                                    // sort the vector by count 
+                      [](pair<int64_t, int> &a, pair<int64_t, int> &b) {
+                          return a.second > b.second;
+                      });
+            int total_count = accumulate(predictions.begin(), predictions.end(), 0,         // sum the count of all predictions and use for confidence
+                [](int sum, pair<int64_t, int>& p) {
+                    return sum + p.second;
+                });
+            for (auto &prediction : predictions) {                                          // add predictions to Pf collector if confidence is above threshold (i.e. given Pf occured >Threshold% of the time)
+                if ((static_cast<double>(prediction.second) * 100 / total_count) >= config_ptr->percent_threshold) {    
+                    top_predictions.push_back(prediction.first);
+                } else {
+                    break;
+                }
+            }
+        }
+        
+        auto lru_it = find(markov_LRU.begin(), markov_LRU.begin() + min(markov_LRU_front, (int)markov_LRU.size()), val_it); // update LRU 
+        if (lru_it != markov_LRU.begin() + min(markov_LRU_front, (int)markov_LRU.size())) {                                 // if key is found in LRU
+            int index = static_cast<int>(lru_it - markov_LRU.begin());
+            markov_update_lru(index);
+        } else {                                                                                                            // if key is NOT found in LRU
+            if (markov_LRU_front < MT_limit - 1) {                                                                          // if LRU is not full
+                if ((int)markov_LRU.size() <= markov_LRU_front) {                                                           // if LRU is smaller than LRU front
+                    markov_LRU.resize(markov_LRU_front + 1);
+                }
+                markov_LRU[markov_LRU_front] = val_it;
+                markov_LRU_front++;
+            } else {                                                                                                        // if LRU is full we evict the LRU and shift the rest
+                auto toDel = markov_evict_lru();                                                                            // LRU made of iterators 
+                for (auto &outer_pair : markov_table) {                                                                     // find the key in the table 
+                    auto &inner_map = outer_pair.second;
+                    for (auto it_inner = inner_map.begin(); it_inner != inner_map.end();) {
+                        if (it_inner == toDel) {
+                            it_inner = inner_map.erase(it_inner);
+                            break;
+                        } else {
+                            ++it_inner;
+                        }
+                    }
+                }
+                for (auto it_outer = markov_table.begin(); it_outer != markov_table.end();) {
+                    if (it_outer->second.empty()) {
+                        it_outer = markov_table.erase(it_outer);
+                    } else {
+                        ++it_outer;
+                    }
+                }
+                if (markov_LRU_front > 0 && markov_LRU.size() > markov_LRU_front - 1) {
+                    markov_LRU[markov_LRU_front - 1] = val_it;
+                }
+            }
+        }
+        return top_predictions;
+    }    
+};
+
+
+// Global instances
+IDMM markov_prefetcher1;
+IDMM markov_prefetcher2;
+IDMM markov_prefetcher3;
+IDMM markov_prefetcher4;
+
+// IP tracker - EXACT as original
+class IP_TRACKER {
+  public:
+    uint64_t ip;
+    uint64_t last_cl_addr;
+    int64_t last_stride;
+    uint32_t lru;
+
+    IP_TRACKER () {
+        ip = 0;
+        last_cl_addr = 0;
+        last_stride = 0;
+        lru = 0;
+    };
+};
+
+IP_TRACKER trackers[IP_TRACKER_COUNT];
+
+void CACHE::l2c_prefetcher_initialize() {
+    mt1_config.lru_size=64; mt1_config.tracking_max=64; mt1_config.tracking_min=32; mt1_config.percent_threshold=40; mt1_config.prefetcher_id=1;
+    mt1_config.tracking_key="pre_delta_ip"; mt1_config.tracking_value="delta_block";
+    
+    mt2_config.lru_size=128; mt2_config.tracking_max=32; mt2_config.tracking_min=16; mt2_config.percent_threshold=30; mt2_config.prefetcher_id=2;
+    mt2_config.tracking_key="pre_delta_ip"; mt2_config.tracking_value="delta_block";
+    
+    mt3_config.lru_size=320; mt3_config.tracking_max=16; mt3_config.tracking_min=8; mt3_config.percent_threshold=25; mt3_config.prefetcher_id=3;
+    mt3_config.tracking_key="pre_delta_ip"; mt3_config.tracking_value="delta_block";
+    
+    mt4_config.lru_size=512; mt4_config.tracking_max=8; mt4_config.tracking_min=0; mt4_config.percent_threshold=20; mt4_config.prefetcher_id=4;
+    mt4_config.tracking_key="pre_delta_ip"; mt4_config.tracking_value="delta_block";
+
+    markov_prefetcher1.set_config(&mt1_config);
+    markov_prefetcher2.set_config(&mt2_config);
+    markov_prefetcher3.set_config(&mt3_config);
+    markov_prefetcher4.set_config(&mt4_config);
+
+    cout << "MT1: " << "Size: " << mt1_config.lru_size << " TMAX: " << mt1_config.tracking_max << " TMIN: " << mt1_config.tracking_min << " MT1PTHRESH: " << mt1_config.percent_threshold << endl;
+    cout << "MT2: " << "Size: " << mt2_config.lru_size << " TMAX: " << mt2_config.tracking_max << " TMIN: " << mt2_config.tracking_min << " MT2PTHRESH: " << mt2_config.percent_threshold << endl;
+    cout << "MT3: " << "Size: " << mt3_config.lru_size << " TMAX: " << mt3_config.tracking_max << " TMIN: " << mt3_config.tracking_min << " MT3PTHRESH: " << mt3_config.percent_threshold << endl;
+    cout << "MT4: " << "Size: " << mt4_config.lru_size << " TMAX: " << mt4_config.tracking_max << " TMIN: " << mt4_config.tracking_min << " MT4PTHRESH: " << mt4_config.percent_threshold << endl;
+
+    cout << "Stride Size: " << IP_TRACKER_COUNT << " Prefetch Degree: " << PREFETCH_DEGREE << endl<< endl; 
+    cout << "CPU " << cpu << " L2C prefetcher" << endl;
+    
+    for (int i=0; i<IP_TRACKER_COUNT; i++)
+        trackers[i].lru = i;
+
+    prefetcher_count[1]=0;
+    prefetcher_count[2]=0;
+    prefetcher_count[3]=0;
+    prefetcher_count[4]=0;
+    prefetcher_count[5]=0;
+    prefetcher_count[6]=0;
+    prefetcher_count[7]=0;
+    prefetcher_count[8]=0;
+    cout << "now IPC : DUMMY FLAG V8" << endl;
+}
+
+uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint32_t metadata_in) {
+    // Cache hit tracking - EXACT as original
+    if (cache_hit) {
+        for (auto it = currentRound_prefetches.begin(); it != currentRound_prefetches.end(); ++it) {
+            if (it->first == addr) {
+                nxtH_cnt[it->second]++;
+            }
+        }
+        tH_cnt++;
+    }
+    currentRound_prefetches.clear();
+
+    // IP stride average tracking - EXACT as original
+    nxtAddrHit_IP_Stride_avg = (nxtAddrHit_IP_Stride_avg*nxtAddrHit_IP_Stride_avg_cnt + pf_nxtH_acc[0])/(++nxtAddrHit_IP_Stride_avg_cnt);
+    
+    // Cache initialization - EXACT as original
+    if(NUM_CACHELINES == 0){
+        uint64_t cache_size = (L2C_SET*L2C_WAY*BLOCK_SIZE)/1024;
+        cout << "CPU " << cpu << " L2C prefetcher initialized" << endl;
+        cout << "\n\nCache Size: " << cache_size << endl;
+        cout << "number of cache lines: " << L2C_SET*L2C_WAY << endl;
+        NUM_CACHELINES = L2C_SET*L2C_WAY;
+    }
+    
+    uint64_t alignedAddr = addr >> LOG2_BLOCK_SIZE;
+    uint64_t cl_addr = addr >> LOG2_BLOCK_SIZE;
+
+    // Process access data once for all Markov prefetchers
+    shared_access_data.init_process_access(alignedAddr, ip); 
+
+    // IP STRIDE PREFETCHER - EXACT as original
+    int index = -1;
+    for (index=0; index<IP_TRACKER_COUNT; index++) {
+        if (trackers[index].ip == ip)
+            break;
+    }
+
+    if (index == IP_TRACKER_COUNT) {
+        for (index=0; index<IP_TRACKER_COUNT; index++) {
+            if (trackers[index].lru == (IP_TRACKER_COUNT-1))
+                break;
+        }
+
+        trackers[index].ip = ip;
+        trackers[index].last_cl_addr = cl_addr;
+        trackers[index].last_stride = 0;
+        new_entry_count++;
+
+        for (int i=0; i<IP_TRACKER_COUNT; i++) {
+            if (trackers[i].lru < trackers[index].lru)
+                trackers[i].lru++;
+        }
+        trackers[index].lru = 0;
+        return metadata_in;
+    }
+
+    if (index == -1)
+        assert(0);
+
+    // Window stats update - EXACT as original  
+    MSHR_win_cnt+=MSHR.occupancy;
+    if (cnt % WINDOW == 0){
+        entryFrequency = (double)new_entry_count/WINDOW; 
+        new_entry_count = 0;
+        MSHR_win_cnt = 0;
+        print_cnt++;
+        
+        for (int i=0; i<nxtH_cnt.size(); i++){
+            if (pf_guess_cnt[i]==0){
+                pf_nxtH_acc[i] = -1;
+            }
+
+            pf_nxtH_acc[i] = (double)nxtH_cnt[i]/(double)WINDOW;
+            if (find(debugger.begin(), debugger.end(), 1) != debugger.end()){
+                cout << " " << i << ":" << setw(7) <<left<< (double)pf_nxtH_acc[i] << " C:"<<(isPfActive[i]?"T":"F")<<setw(3)<<pf_guess_cnt[i] <<left<<" H"<<left<<setw(2)<<(pf_nxtH_acc[i]>0.001) << " iR:"<<number_of_inRowPfInactivity[i];
+            }
+
+            if (((double)pf_nxtH_acc[i]) > (double)0.001 ){
+                isPfActive[i] = true;
+                number_of_inRowPfInactivity[i]=0;
+            } else {
+                number_of_inRowPfInactivity[i]++;
+                if ((number_of_inRowPfInactivity[i] == 10) || (number_of_inRowPfInactivity[i] == 7) || (number_of_inRowPfInactivity[i] >= 14) && (number_of_inRowPfInactivity[i] < 16)){
+                    isPfActive[i] = false;
+                } else {
+                    isPfActive[i] = true;
+                }
+            }
+            nxtH_cnt[i] = 0;
+            pf_guess_cnt[i] = 0;
+        }
+        if (find(debugger.begin(), debugger.end(), 1) != debugger.end()){
+            cout << " totH: " << tH_cnt/(double)WINDOW;
+            cout << " Avg:"<<nxtAddrHit_IP_Stride_avg <<endl;
+        }
+        nxtH_cnt[4] = tH_cnt/(double)WINDOW;
+        tH_cnt = 0;
+    }
+
+    if (print_cnt > 5){
+        print_cnt = 0;
+    }
+
+    // Stride calculation and prefetching - EXACT as original
+    int64_t stride = 0;
+    if (cl_addr > trackers[index].last_cl_addr)
+        stride = cl_addr - trackers[index].last_cl_addr;
+    else {
+        stride = trackers[index].last_cl_addr - cl_addr;
+        stride *= -1;
+    }
+
+    if (stride == 0)
+        return metadata_in;
+
+    if (stride == trackers[index].last_stride) {
+        int prefetchDegree;
+
+        if (MSHR.occupancy < (1*MSHR.SIZE)/8)
+            prefetchDegree = PREFETCH_DEGREE;
+        else if (MSHR.occupancy < (1*MSHR.SIZE)/5)
+            prefetchDegree = PREFETCH_DEGREE/2;
+        else if (MSHR.occupancy < (1*MSHR.SIZE)/2)
+            prefetchDegree = PREFETCH_DEGREE/5;
+        else 
+            prefetchDegree = PREFETCH_DEGREE/4;
+
+        if (pf_nxtH_acc[0]-nxtAddrHit_IP_Stride_avg>0.05){
+            prefetchDegree +=4;
+        }
+
+        flagged = 0;
+        for (int i=0; i<(prefetchDegree); i++) {
+            if (flagged == 0){
+                pf_guess_cnt[IPSTR_ID]++;
+                flagged = 1;
+            }
+
+            uint64_t pf_addr = (cl_addr + (stride*(i+1))) << LOG2_BLOCK_SIZE;
+                
+            if (MSHR.occupancy < ((MSHR.SIZE/4)*3) || pf_nxtH_acc[IPSTR_ID] > 0.01){
+                prefetch_line(ip, addr, pf_addr, FILL_L2, metadata_in);
+            }
+            else{
+                prefetch_line(ip, addr, pf_addr, FILL_LLC, metadata_in);
+            }
+            currentRound_prefetches.push_back(make_pair(pf_addr, IPSTR_ID));
+            prefetcher_count[2]++;
+        }
+    }
+
+    // Update IP tracker - EXACT as original
+    trackers[index].last_cl_addr = cl_addr;
+    trackers[index].last_stride = stride;
+    for (int i=0; i<IP_TRACKER_COUNT; i++) {
+        if (trackers[i].lru < trackers[index].lru)
+            trackers[i].lru++;
+    }
+    trackers[index].lru = 0;
+
+    // MARKOV PREFETCHERS - Using shared AccessData, each with own previous state
+    
+    // mt1
+    pf_cnt = 0;
+    vector<int64_t> markov_predictions1 = markov_prefetcher1.operate(shared_access_data, alignedAddr, ip, cache_hit, type);
+    flagged = 0;
+    for (auto offset : markov_predictions1) {
+        if (flagged == 0){
+            pf_guess_cnt[mt1_config.prefetcher_id]++;
+            flagged = 1;
+        }
+
+        pf_addr = ((alignedAddr - offset) << LOG2_BLOCK_SIZE);
+        
+        if (pf_nxtH_acc[mt1_config.prefetcher_id] < 0.01 && pf_cnt >= 3){
+            continue;
+        }
+        if (pf_nxtH_acc[mt1_config.prefetcher_id]<0.001 && pf_cnt >= 1){
+            continue;
+        }
+        
+        if (MSHR.occupancy < (MSHR.SIZE/2)){    
+            if (isPfActive[mt1_config.prefetcher_id]==true){
+                prefetch_line(ip, addr, (pf_addr), FILL_L2, metadata_in);
+            }
+            currentRound_prefetches.push_back(make_pair(pf_addr, mt1_config.prefetcher_id));
+        }
+        else{
+            if (isPfActive[mt1_config.prefetcher_id]==true){
+                prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+            }
+            currentRound_prefetches.push_back(make_pair(pf_addr, mt1_config.prefetcher_id));
+        }  
+        prefetcher_count[3]++;
+        pf_cnt++;
+    }
+
+    // mt2
+    vector<int64_t> markov_predictions2 = markov_prefetcher2.operate(shared_access_data, alignedAddr, ip, cache_hit, type);
+    flagged = 0;
+    pf_cnt = 0;
+    for (auto offset : markov_predictions2) {
+        if (flagged == 0){
+            pf_guess_cnt[mt2_config.prefetcher_id]++;
+            flagged = 1;
+        }
+        
+        pf_addr = ((alignedAddr - offset) << LOG2_BLOCK_SIZE);
+        
+        if (pf_nxtH_acc[mt2_config.prefetcher_id] < 0.01 && pf_cnt >= 3){
+            continue;
+        }
+        if (pf_nxtH_acc[mt2_config.prefetcher_id]<0.001 && pf_cnt >= 1){
+            continue;
+        }
+        
+        if (MSHR.occupancy < (MSHR.SIZE/2) ){   
+            if (isPfActive[mt2_config.prefetcher_id]==true){ 
+                prefetch_line(ip, addr, (pf_addr), FILL_L2, metadata_in);
+            }
+            prefetcher_count[4]++;
+            currentRound_prefetches.push_back(make_pair(pf_addr, mt2_config.prefetcher_id));
+        }
+        else{
+            if (isPfActive[mt2_config.prefetcher_id]==true){
+                prefetcher_count[4]++;
+                prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+            }
+        }
+        pf_cnt++;  
+    }
+
+    // mt3
+    pf_cnt = 0;
+    vector<int64_t> markov_predictions3 = markov_prefetcher3.operate(shared_access_data, alignedAddr, ip, cache_hit, type);
+    flagged = 0;
+    for (auto offset : markov_predictions3) {
+        if (flagged == 0){
+            pf_guess_cnt[mt3_config.prefetcher_id]++;
+            flagged = 1;
+        }
+
+        if (pf_nxtH_acc[mt3_config.prefetcher_id] < 0.01 && pf_cnt >= 3){
+            continue;
+        }
+if (pf_nxtH_acc[mt3_config.prefetcher_id]<0.001 && pf_cnt >= 1){
+           continue;
+       }
+
+       pf_addr = ((alignedAddr - offset) << LOG2_BLOCK_SIZE);
+       if (MSHR.occupancy < (MSHR.SIZE/2)){  
+           if (isPfActive[mt3_config.prefetcher_id]==true){
+           prefetch_line(ip, addr, (pf_addr), FILL_L2, metadata_in);
+           }  
+           prefetcher_count[5]++;
+           currentRound_prefetches.push_back(make_pair(pf_addr, mt3_config.prefetcher_id));
+       }
+       else{
+           if (isPfActive[mt3_config.prefetcher_id]==true){
+           prefetcher_count[5]++;
+           prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+           }
+       }  
+       pf_cnt++;
+   }
+
+   // mt4
+   vector<int64_t> markov_predictions4 = markov_prefetcher4.operate(shared_access_data, alignedAddr, ip, cache_hit, type);
+   flagged = 0;
+   pf_cnt = 0;
+   for (auto offset : markov_predictions4) {
+       if (flagged == 0){
+           pf_guess_cnt[mt4_config.prefetcher_id]++;
+           flagged = 1;
+       }
+
+       if (pf_nxtH_acc[mt4_config.prefetcher_id] < 0.01 && pf_cnt >= 3){
+           continue;
+       }
+       if (pf_nxtH_acc[mt4_config.prefetcher_id]<0.001 && pf_cnt >= 1){
+           continue;
+       }
+       
+       pf_addr = ((alignedAddr - offset) << LOG2_BLOCK_SIZE);
+       
+       if (MSHR.occupancy < (MSHR.SIZE/2)){ 
+           if (isPfActive[mt4_config.prefetcher_id]==true){
+               prefetch_line(ip, addr, (pf_addr), FILL_L2, metadata_in);
+           }   
+           prefetcher_count[6]++;
+           currentRound_prefetches.push_back(make_pair(pf_addr, mt4_config.prefetcher_id));
+       }
+       else{
+           if (isPfActive[mt4_config.prefetcher_id]==true){
+               prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+               prefetcher_count[6]++;
+           }
+       }  
+   }
+
+   // Update global state - EXACT as original
+   pre_previous_addr = previous_addr;
+   preIP = ip;
+   previous_addr = addr;
+   cnt++;
+
+   return metadata_in;
+}
+
+uint32_t CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in) {
+   return metadata_in;
+}
+
+void CACHE::l2c_prefetcher_final_stats() {
+   cout << "CPU " << cpu << " L2C PC-based stride prefetcher final stats" << endl;
+   cout << "Stride Degree: " << PREFETCH_DEGREE << endl;
+   
+   cout << "MT1  MARKOV_LRU_SIZE: " << mt1_config.lru_size << endl;
+   cout << "MT1  MARKOV_PREDICTION_PERCENTTHRESHOLD: " << mt1_config.percent_threshold << endl;
+   cout << "MT1  OUTLIERS_THRESHOLD_Max: " << mt1_config.tracking_max << endl;
+   cout << "MT1  OUTLIERS_THRESHOLD_Min: " << mt1_config.tracking_min << endl; 
+
+   cout << "MT2  MARKOV_LRU_SIZE: " << mt2_config.lru_size << endl;
+   cout << "MT2  MARKOV_PREDICTION_PERCENTTHRESHOLD: " << mt2_config.percent_threshold << endl;
+   cout << "MT2  OUTLIERS_THRESHOLD_Max: " << mt2_config.tracking_max << endl;
+   cout << "MT2  OUTLIERS_THRESHOLD_Min: " << mt2_config.tracking_min << endl; 
+
+   cout << "MT3  MARKOV_LRU_SIZE: " << mt3_config.lru_size << endl;
+   cout << "MT3  MARKOV_PREDICTION_PERCENTTHRESHOLD: " << mt3_config.percent_threshold << endl;
+   cout << "MT3  OUTLIERS_THRESHOLD_Max: " << mt3_config.tracking_max << endl;
+   cout << "MT3  OUTLIERS_THRESHOLD_Min: " << mt3_config.tracking_min << endl; 
+
+   cout << "MT4  MARKOV_LRU_SIZE: " << mt4_config.lru_size << endl;
+   cout << "MT4  MARKOV_PREDICTION_PERCENTTHRESHOLD: " << mt4_config.percent_threshold << endl;
+   cout << "MT4  OUTLIERS_THRESHOLD_Max: " << mt4_config.tracking_max << endl;
+   cout << "MT4  OUTLIERS_THRESHOLD_Min: " << mt4_config.tracking_min << endl;
+
+   cout << "IPStride Degree/Access Ratio: " << (double)prefetcher_count[2]/(double)cnt << endl;
+   cout << "MT1 IPDEltaMarkov  Degree/Access Ratio: " << (double)prefetcher_count[3]/(double)cnt << endl;
+   cout << "MT2 IPDEltaMarkov  Degree/Access Ratio: " << (double)prefetcher_count[4]/(double)cnt << endl;
+   cout << "MT3 IPDEltaMarkov  Degree/Access Ratio: " << (double)prefetcher_count[5]/(double)cnt << endl;
+   cout << "MT4 IPDEltaMarkov  Degree/Access Ratio: " << (double)prefetcher_count[6]/(double)cnt << endl;
+}

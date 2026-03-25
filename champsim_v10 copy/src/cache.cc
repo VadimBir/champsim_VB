@@ -1,0 +1,2428 @@
+#include "cache.h"
+#include "set.h"
+#include "ooo_l1_byp_model.cc"
+#ifdef BYPASS_L2_LOGIC
+#include "ooo_l2_byp_model.cc"
+#endif
+#ifdef BYPASS_LLC_LOGIC
+#include "ooo_llc_byp_model.cc"
+#endif
+
+uint64_t l2pf_access = 0;
+bool FORCE_ALL_HITS = false;
+
+#include "lpm_tracker.h"
+LPM_Tracker lpm[NUM_CPUS][LPM_NUM_TYPES];   /* definition */
+
+void CACHE::set_force_all_hits(bool toEnable) {
+    FORCE_ALL_HITS = toEnable;
+}
+
+#define CACHE_LVL_BASE IS_L1D
+#define get_cache_lvl_bit(curr_cache_type)   (1u << ((curr_cache_type) - CACHE_LVL_BASE))
+#define set_this_lvl_existance(packet_exist_lvls, cache_type) ((packet_exist_lvls) |= get_cache_lvl_bit(cache_type))
+#define check_upper_has_entry(packet_exist_lvls, cache_type) (((packet_exist_lvls) & ((1u << ((cache_type) - CACHE_LVL_BASE)) - 1)) != 0)
+
+
+
+inline void dump_req(PACKET& o)
+{
+    cout << std::hex << " Addr: "  << o.address;
+    //<< " FAddr: " << o.full_addr
+    cout << std::dec
+    << " instr " << o.instr_id << " fill " << (int)o.fill_level << " type " << int(o.type)
+    << " ROB " << int(o.rob_index);
+    cout << " {";
+    for (auto rob_set : o.rob_index_depend_on_me) {
+        if (warmup_complete[o.cpu]) {
+            if (rob_set == 0) continue;
+            cout << rob_set << " " << dec;
+        }
+    }
+    cout << "} ";
+    cout << "LQ " << int(o.lq_index);
+    cout << " {";
+    ITERATE_SET(lq_set, o.lq_index_depend_on_me, LQ_SIZE) {
+        if (warmup_complete[o.cpu]) {
+            if (lq_set == 0) continue;
+            cout << lq_set << " " << dec;
+        }
+    }
+    cout << "} ";
+    cout << "SQ " << int(o.sq_index);
+    cout << " {";
+    ITERATE_SET(sq_set, o.sq_index_depend_on_me, LQ_SIZE) {
+        if (warmup_complete[o.cpu]) {
+            if (sq_set == 0) continue;
+            cout << sq_set << " " << dec;
+        }
+    }
+    cout << "} ";
+    cout << "ByP " << int(o.l1_bypassed);
+}
+inline void dump_req(PACKET* o)
+{
+    cout << std::hex << " Addr " << o->address;
+    //<< " FAddr " << o->full_addr
+    cout << std::dec
+    << " instr " << o->instr_id << " type " << int(o->type) << " fill " << (int)o->fill_level
+    // << " rob " << int(o->rob_index) << " LQ " << int(o->lq_index) << " SQ " << int(o->sq_index);
+    << " ROB " << int(o->rob_index);
+    cout << " {";
+    for (auto rob_set : o->rob_index_depend_on_me) {
+        if (warmup_complete[o->cpu]) {
+            if (rob_set == 0) continue;
+            cout << rob_set << " " << dec;
+        }
+    }
+    cout << "} ";
+    cout << "LQ " << int(o->lq_index);
+    cout << " {";
+    ITERATE_SET(lq_set, o->lq_index_depend_on_me, LQ_SIZE) {
+        if (warmup_complete[o->cpu]) {
+            if (lq_set == 0) continue;
+            cout << lq_set << " " << dec;
+        }
+    }
+    cout << "} ";
+    cout << "SQ " << int(o->sq_index);
+    cout << " {";
+    ITERATE_SET(sq_set, o->sq_index_depend_on_me, LQ_SIZE) {
+        if (warmup_complete[o->cpu]) {
+            if (sq_set == 0) continue;
+            cout << sq_set << " " << dec;
+        }
+    }
+    cout << "} ";
+    cout << "ByP " << int(o->l1_bypassed);
+}
+
+
+
+
+
+
+#ifdef BYPASS_DEBUG
+std::vector<CACHE*> ALL_CACHES;
+#endif
+
+void print_cache_config() {
+    cout << std::right << setw(3) <<"itlb_sz ;"<<std::left << setw(4) << (ITLB_SET*ITLB_WAY*BLOCK_SIZE)/1024 << ";"
+        << std::right << setw(12) <<"itlb_set ;"<<std::left << setw(5) << ITLB_SET << ";"
+        << std::right << setw(12) <<"itlb_way ;"<<std::left << setw(3) << ITLB_WAY << ";"
+        << std::right << setw(12) <<"itlb_rq_sz ;"<<std::left << setw(3) << ITLB_RQ_SIZE << ";"
+        << std::right << setw(12) <<"itlb_wq_sz ;"<<std::left << setw(3) << ITLB_WQ_SIZE << ";"
+        << std::right << setw(12) <<"itlb_pq_sz ;"<<std::left << setw(3) << ITLB_PQ_SIZE << ";"
+        << std::right << setw(12) <<"itlb_mshr_sz ;"<<std::left << setw(5) << ITLB_MSHR_SIZE << ";"
+        << std::right << setw(12) <<"itlb_latency ;"<<std::left << setw(5) << ITLB_LATENCY
+        << endl
+        << std::right << setw(3) <<"dtlb_sz ;"<<std::left << setw(4) << (DTLB_SET*DTLB_WAY*BLOCK_SIZE)/1024 << ";"
+        << std::right << setw(12) <<"dtlb_set ;"<<std::left << setw(5) << DTLB_SET << ";"
+        << std::right << setw(12) <<"dtlb_way ;"<<std::left << setw(3) << DTLB_WAY << ";"
+        << std::right << setw(12) <<"dtlb_rq_sz ;"<<std::left << setw(3) << DTLB_RQ_SIZE << ";"
+        << std::right << setw(12) <<"dtlb_wq_sz ;"<<std::left << setw(3) << DTLB_WQ_SIZE << ";"
+        << std::right << setw(12) <<"dtlb_pq_sz ;"<<std::left << setw(3) << DTLB_PQ_SIZE << ";"
+        << std::right << setw(12) <<"dtlb_mshr_sz ;"<<std::left << setw(5) << DTLB_MSHR_SIZE << ";"
+        << std::right << setw(12) <<"dtlb_latency ;"<<std::left << setw(5) << DTLB_LATENCY
+        << endl
+        << std::right << setw(3) <<"stlb_sz ;"<<std::left << setw(4) << (STLB_SET*STLB_WAY*BLOCK_SIZE)/1024 << ";"
+        << std::right << setw(12) <<"stlb_set ;"<<std::left << setw(5) << STLB_SET << ";"
+        << std::right << setw(12) <<"stlb_way ;"<<std::left << setw(3) << STLB_WAY << ";"
+        << std::right << setw(12) <<"stlb_rq_sz ;"<<std::left << setw(3) << STLB_RQ_SIZE << ";"
+        << std::right << setw(12) <<"stlb_wq_sz ;"<<std::left << setw(3) << STLB_WQ_SIZE << ";"
+        << std::right << setw(12) <<"stlb_pq_sz ;"<<std::left << setw(3) << STLB_PQ_SIZE << ";"
+        << std::right << setw(12) <<"stlb_mshr_sz ;"<<std::left << setw(5) << STLB_MSHR_SIZE << ";"
+        << std::right << setw(12) <<"stlb_latency ;"<<std::left << setw(5) << STLB_LATENCY
+        << endl
+        << std::right << setw(5) <<"l1i_sz ;"<<std::left << setw(5) << (L1I_SET*L1I_WAY*BLOCK_SIZE)/1024 << ";"
+        << std::right << setw(12) <<"l1i_set ;"<<std::left << setw(5) << L1I_SET << ";"
+        << std::right << setw(12) <<"l1i_way ;"<<std::left << setw(3) << L1I_WAY << ";"
+        << std::right << setw(12) <<"l1i_rq_sz ;"<<std::left << setw(3) << L1I_RQ_SIZE << ";"
+        << std::right << setw(12) <<"l1i_wq_sz ;"<<std::left << setw(3) << L1I_WQ_SIZE << ";"
+        << std::right << setw(12) <<"l1i_pq_sz ;"<<std::left << setw(3) << L1I_PQ_SIZE << ";"
+        << std::right << setw(12) <<"l1i_mshr_sz ;"<<std::left << setw(5) << L1I_MSHR_SIZE << ";"
+        << std::right << setw(12) <<"l1i_latency ;"<<std::left << setw(5) << L1I_LATENCY
+        << endl
+        << std::right << setw(5) <<"l1d_sz ;"<<std::left << setw(5) << (L1D_SET*L1D_WAY*BLOCK_SIZE)/1024 << ";"
+        << std::right << setw(12) <<"l1d_set ;"<<std::left << setw(5) << L1D_SET << ";"
+        << std::right << setw(12) <<"l1d_way ;"<<std::left << setw(3) << L1D_WAY << ";"
+        << std::right << setw(12) <<"l1d_rq_sz ;"<<std::left << setw(3) << L1D_RQ_SIZE << ";"
+        << std::right << setw(12) <<"l1d_wq_sz ;"<<std::left << setw(3) << L1D_WQ_SIZE << ";"
+        << std::right << setw(12) <<"l1d_pq_sz ;"<<std::left << setw(3) << L1D_PQ_SIZE << ";"
+        << std::right << setw(12) <<"l1d_mshr_sz ;"<<std::left << setw(5) << L1D_MSHR_SIZE << ";"
+        << std::right << setw(12) <<"l1d_latency ;"<<std::left << setw(5) << L1D_LATENCY
+        << endl
+        << std::right << setw(5) <<"l2c_sz ;"<<std::left << setw(5) << (L2C_SET*L2C_WAY*BLOCK_SIZE)/1024 << ";"
+        << std::right << setw(12) <<"l2c_set ;"<<std::left << setw(5) << L2C_SET << ";"
+        << std::right << setw(12) <<"l2c_way ;"<<std::left << setw(3) << L2C_WAY << ";"
+        << std::right << setw(12) <<"l2c_rq_sz ;"<<std::left << setw(3) << L2C_RQ_SIZE << ";"
+        << std::right << setw(12) <<"l2c_wq_sz ;"<<std::left << setw(3) << L2C_WQ_SIZE << ";"
+        << std::right << setw(12) <<"l2c_pq_sz ;"<<std::left << setw(3) << L2C_PQ_SIZE << ";"
+        << std::right << setw(12) <<"l2c_mshr_sz ;"<<std::left << setw(5) << L2C_MSHR_SIZE << ";"
+        << std::right << setw(12) <<"l2c_latency ;"<<std::left << setw(5) << L2C_LATENCY
+        << endl
+        << std::right << setw(5) <<"llc_sz ;"<<std::left << setw(5) << (LLC_SET*LLC_WAY*BLOCK_SIZE)/1024 << ";"
+        << std::right << setw(12) <<"llc_set ;"<<std::left << setw(5) << LLC_SET << ";"
+        << std::right << setw(12) <<"llc_way ;"<<std::left << setw(3) << LLC_WAY << ";"
+        << std::right << setw(12) <<"llc_rq_sz ;"<<std::left << setw(3) << LLC_RQ_SIZE << ";"
+        << std::right << setw(12) <<"llc_wq_sz ;"<<std::left << setw(3) << LLC_WQ_SIZE << ";"
+        << std::right << setw(12) <<"llc_pq_sz ;"<<std::left << setw(3) << LLC_PQ_SIZE << ";"
+        << std::right << setw(12) <<"llc_mshr_sz ;"<<std::left << setw(5) << LLC_MSHR_SIZE << ";"
+        << std::right << setw(12) <<"llc_latency ;"<<std::left << setw(5) << LLC_LATENCY
+        << endl;
+}
+// pending vector requests
+#include <vector>
+std::vector<PACKET> pending_requests;
+void CACHE::handle_fill() {
+
+    // handle fill
+    uint16_t fill_cpu = (MSHR.next_fill_index == MSHR_SIZE) ? NUM_CPUS : MSHR.entry[MSHR.next_fill_index].cpu;
+    if (fill_cpu == NUM_CPUS)
+        return;
+
+    if (MSHR.next_fill_cycle <= current_core_cycle[fill_cpu]) {
+
+#ifdef TRUE_SANITY_CHECK
+        if (MSHR.next_fill_index >= MSHR.SIZE)
+            assert(0);
+#endif
+
+        uint16_t mshr_index = MSHR.next_fill_index;
+
+        // find victim
+        uint32_t set = get_set(MSHR.entry[mshr_index].address), way;
+        if (cache_type == IS_LLC) {
+            way = llc_find_victim(fill_cpu, MSHR.entry[mshr_index].instr_id, set, block[set], MSHR.entry[mshr_index].ip, MSHR.entry[mshr_index].full_addr, MSHR.entry[mshr_index].type);
+        }
+        else
+            way = find_victim(fill_cpu, MSHR.entry[mshr_index].instr_id, set, block[set], MSHR.entry[mshr_index].ip, MSHR.entry[mshr_index].full_addr, MSHR.entry[mshr_index].type);
+
+#ifdef LLC_BYPASS
+        if ((cache_type == IS_LLC) && (way == LLC_WAY)) { // this is a bypass that does not fill the LLC
+
+            // update replacement policy
+            if (cache_type == IS_LLC) {
+                llc_update_replacement_state(fill_cpu, set, way, MSHR.entry[mshr_index].full_addr, MSHR.entry[mshr_index].ip, 0, MSHR.entry[mshr_index].type, 0);
+
+            }
+            else
+                update_replacement_state(fill_cpu, set, way, MSHR.entry[mshr_index].full_addr, MSHR.entry[mshr_index].ip, 0, MSHR.entry[mshr_index].type, 0);
+
+            // COLLECT STATS
+            sim_miss[fill_cpu][MSHR.entry[mshr_index].type]++;
+            sim_access[fill_cpu][MSHR.entry[mshr_index].type]++;
+
+            // check fill level
+            if (MSHR.entry[mshr_index].fill_level < fill_level) {
+
+                if (MSHR.entry[mshr_index].instruction)
+                    upper_level_icache[fill_cpu]->return_data(&MSHR.entry[mshr_index]);
+                else // data
+                    upper_level_dcache[fill_cpu]->return_data(&MSHR.entry[mshr_index]);
+            }
+
+	    if(warmup_complete[fill_cpu])
+	      {
+		uint64_t current_miss_latency = (current_core_cycle[fill_cpu] - MSHR.entry[mshr_index].cycle_enqueued);
+		total_miss_latency += current_miss_latency;
+	      }
+
+            MSHR.remove_queue(&MSHR.entry[mshr_index]);
+            MSHR.num_returned--;
+
+            update_fill_cycle();
+
+            return; // return here, no need to process further in this function
+        }
+#endif
+
+        uint8_t  do_fill = 1;
+
+        // is this dirty?
+        if (block[set][way].dirty) {
+
+            // check if the lower level WQ has enough room to keep this writeback request
+            if (lower_level) {
+                if (lower_level->get_occupancy(2, block[set][way].address) == lower_level->get_size(2, block[set][way].address)) {
+
+                    // lower level WQ is full, cannot replace this victim
+                    do_fill = 0;
+                    lower_level->increment_WQ_FULL(block[set][way].address);
+                    STALL[MSHR.entry[mshr_index].type]++;
+
+                    // DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[fill_cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                    // cout << "[" << NAME << "] " << __func__ << "do_fill: " << +do_fill;
+                    // cout << " lower level wq is full!" << " fill_addr: " << hex << MSHR.entry[mshr_index].address;
+                    // cout << " victim_addr: " << block[set][way].tag << dec << endl; });
+                }
+                else {
+                    PACKET writeback_packet;
+
+                    writeback_packet.fill_level = fill_level << 1;
+                    writeback_packet.cpu = fill_cpu;
+                    writeback_packet.address = block[set][way].address;
+                    writeback_packet.full_addr = block[set][way].full_addr;
+                    writeback_packet.data = block[set][way].data;
+                    writeback_packet.instr_id = MSHR.entry[mshr_index].instr_id;
+                    writeback_packet.ip = 0; // writeback does not have ip
+                    writeback_packet.type = WRITEBACK;
+                    writeback_packet.event_cycle = current_core_cycle[fill_cpu];
+#ifdef BYPASS_DEBUG
+                    if (MSHR.entry[mshr_index].l1_bypassed == 1)
+                        cerr << " THIS IS WriteBack that HAS ByP set ... " << endl;
+#endif
+
+                    lower_level->add_wq(&writeback_packet);
+                }
+            }
+#ifdef TRUE_SANITY_CHECK
+            else {
+                // sanity check
+                if (cache_type != IS_STLB)
+                    assert(0);
+            }
+#endif
+        }
+
+        if (do_fill){
+            // update prefetcher
+            if (cache_type == IS_L1D)
+	      l1d_prefetcher_cache_fill(MSHR.entry[mshr_index].full_addr, set, way, (MSHR.entry[mshr_index].type == PREFETCH) ? 1 : 0, block[set][way].address<<LOG2_BLOCK_SIZE,
+					MSHR.entry[mshr_index].pf_metadata);
+            if  (cache_type == IS_L2C)
+	      MSHR.entry[mshr_index].pf_metadata = l2c_prefetcher_cache_fill(MSHR.entry[mshr_index].address<<LOG2_BLOCK_SIZE, set, way, (MSHR.entry[mshr_index].type == PREFETCH) ? 1 : 0,
+									     block[set][way].address<<LOG2_BLOCK_SIZE, MSHR.entry[mshr_index].pf_metadata);
+            if (cache_type == IS_LLC){
+		        cpu = fill_cpu;
+		        MSHR.entry[mshr_index].pf_metadata = llc_prefetcher_cache_fill(MSHR.entry[mshr_index].address<<LOG2_BLOCK_SIZE, set, way, (MSHR.entry[mshr_index].type == PREFETCH) ? 1 : 0,
+									       block[set][way].address<<LOG2_BLOCK_SIZE, MSHR.entry[mshr_index].pf_metadata);
+                cpu = 0;
+	      }
+
+            // update replacement policy
+            if (cache_type == IS_LLC) {
+                llc_update_replacement_state(fill_cpu, set, way, MSHR.entry[mshr_index].full_addr, MSHR.entry[mshr_index].ip, block[set][way].full_addr, MSHR.entry[mshr_index].type, 0);
+            }
+            else
+                update_replacement_state(fill_cpu, set, way, MSHR.entry[mshr_index].full_addr, MSHR.entry[mshr_index].ip, block[set][way].full_addr, MSHR.entry[mshr_index].type, 0);
+
+            // COLLECT STATS
+            sim_miss[fill_cpu][MSHR.entry[mshr_index].type]++;
+            sim_access[fill_cpu][MSHR.entry[mshr_index].type]++;
+
+            fill_cache(set, way, &MSHR.entry[mshr_index]);
+
+            // RFO marks cache line dirty
+            if (cache_type == IS_L1D) {
+                if (MSHR.entry[mshr_index].type == RFO)
+                    block[set][way].dirty = 1;
+            }
+            // if (cache_type == IS_L2C) {
+            //     if (MSHR.entry[mshr_index].type == RFO)
+            //         assert(0&&" DID NOT EXPECT L2C TO HANDLE RFO ... ");
+            // }
+
+            // check fill level
+            if (MSHR.entry[mshr_index].fill_level < fill_level) {
+
+                if (MSHR.entry[mshr_index].instruction)
+                    upper_level_icache[fill_cpu]->return_data(&MSHR.entry[mshr_index]);
+                else // data
+                    upper_level_dcache[fill_cpu]->return_data(&MSHR.entry[mshr_index]);
+            }
+
+
+            // update processed packets
+            if (cache_type == IS_ITLB) {
+                MSHR.entry[mshr_index].instruction_pa = block[set][way].data;
+                if (PROCESSED.occupancy < PROCESSED.SIZE){
+
+                    PROCESSED.add_queue(&MSHR.entry[mshr_index]);
+                } else {
+                    cerr << "ITLB PROCESSED FULL" << endl;
+                    assert(0&&"RETURN IS LOST FOREVER!!!! ");
+                }
+            }
+            else if (cache_type == IS_DTLB) {
+                MSHR.entry[mshr_index].data_pa = block[set][way].data;
+                if (PROCESSED.occupancy < PROCESSED.SIZE){
+
+                    PROCESSED.add_queue(&MSHR.entry[mshr_index]);
+                } else {
+                    cerr << "DTLB PROCESSED FULL" << endl;
+                    assert(0&&"RETURN IS LOST FOREVER!!!! ");
+                }
+            }
+            else if (cache_type == IS_L1I) {
+                if (PROCESSED.occupancy < PROCESSED.SIZE){
+
+                    PROCESSED.add_queue(&MSHR.entry[mshr_index]);
+                } else {
+                    cerr << "L1I PROCESSED FULL" << endl;
+                    assert(0&&"RETURN IS LOST FOREVER!!!! ");
+                }
+            }
+            //else if (cache_type == IS_L1D) {
+            else if ((cache_type == IS_L1D) && (MSHR.entry[mshr_index].type != PREFETCH)) {
+                if (PROCESSED.occupancy < PROCESSED.SIZE){
+                    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[MSHR.entry[mshr_index].cpu]) {
+                        // print: instr, hex addr, hex full addr, MSHR, occupancy, event cy, curr cy, MSHR ByP, (int) type, (int) fill lvl,
+                        cout << "[" << NAME << "_FILL_PROCESSED] " << __func__ << " L1D add processed instrID: " <<  MSHR.entry[mshr_index].instr_id;
+                        cout << " addr: " <<  hex << MSHR.entry[mshr_index].address << " full_addr: " << MSHR.entry[mshr_index].full_addr << dec;
+                        cout << " occupancy: " << (int)MSHR.occupancy << " event cy: " << MSHR.entry[mshr_index].event_cycle << " curr cy: " << current_core_cycle[cpu];
+                        cout << " BYP: " << (int)MSHR.entry[mshr_index].l1_bypassed << " type: " << (int)MSHR.entry[mshr_index].type << " fill lvl: " << (int)MSHR.entry[mshr_index].fill_level;
+                        cout << endl;
+                    });
+                    PROCESSED.add_queue(&MSHR.entry[mshr_index]);
+                } else {
+                    cerr << "L1D PROCESSED FULL" << endl;
+                    assert(0&&"RETURN IS LOST FOREVER!!!! ");
+                }
+            }
+#ifdef BYPASS_L1_LOGIC
+            else if ((cache_type == IS_L2C) && (MSHR.entry[mshr_index].type == LOAD) && MSHR.entry[mshr_index].l1_bypassed == 1 ) {
+                if (PROCESSED.occupancy < PROCESSED.SIZE){
+#ifdef BYPASS_DEBUG
+                    cout << " L2C ByP complete? " << (int) MSHR.entry[mshr_index].l1_bypassed << endl;
+                    cout << " L2C IS completing some packets: " << " instrID: " <<  MSHR.entry[mshr_index].instr_id  << " rob: " <<  MSHR.entry[mshr_index].rob_index << " addr: " <<  MSHR.entry[mshr_index].address << endl;
+#endif
+                    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[MSHR.entry[mshr_index].cpu]) {
+                        // print: instr, hex addr, hex full addr, MSHR, occupancy, event cy, curr cy, MSHR ByP, (int) type, (int) fill lvl,
+                        cout << "[" << NAME << "_FILL_ByP_PROCESSED] " << __func__ << " L2C=>L1D add processed instrID: " <<  MSHR.entry[mshr_index].instr_id;
+                        cout << " addr: " <<  hex << MSHR.entry[mshr_index].address << " full_addr: " << MSHR.entry[mshr_index].full_addr << dec;
+                        cout << " occupancy: " << (int)MSHR.occupancy << " event cy: " << MSHR.entry[mshr_index].event_cycle << " curr cy: " << current_core_cycle[cpu];
+                        cout << " BYP: " << (int)MSHR.entry[mshr_index].l1_bypassed << " type: " << (int)MSHR.entry[mshr_index].type << " fill lvl: " << (int)MSHR.entry[mshr_index].fill_level;
+                        cout << endl;
+                    });
+                    PROCESSED.add_queue(&MSHR.entry[mshr_index]);
+                } else {
+                    cerr << "L2C PROCESSED FULL" << endl;
+                    assert(0&&"RETURN IS LOST FOREVER!!!! ");
+                }
+            }
+#endif
+#ifdef BYPASS_L2_LOGIC
+            else if ((cache_type == IS_LLC) && (MSHR.entry[mshr_index].type == LOAD) && MSHR.entry[mshr_index].l2_bypassed == 1 ) {
+                    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[MSHR.entry[mshr_index].cpu]) {
+                        cout << "[" << NAME << "_FILL_ByP_ret] " << __func__ << " LLC=>L1D return instrID: " <<  MSHR.entry[mshr_index].instr_id;
+                        cout << " addr: " <<  hex << MSHR.entry[mshr_index].address << " full_addr: " << MSHR.entry[mshr_index].full_addr << dec;
+                        cout << " occupancy: " << (int)MSHR.occupancy << " event cy: " << MSHR.entry[mshr_index].event_cycle << " curr cy: " << current_core_cycle[cpu];
+                        cout << " BYP: " << (int)MSHR.entry[mshr_index].l2_bypassed << " type: " << (int)MSHR.entry[mshr_index].type << " fill lvl: " << (int)MSHR.entry[mshr_index].fill_level;
+                        cout << endl;
+                    });
+                    upper_level_dcache[fill_cpu]->upper_level_dcache[fill_cpu]->return_data(&MSHR.entry[mshr_index]);
+            }
+#endif
+
+	        if(warmup_complete[fill_cpu]){
+		        uint64_t current_miss_latency = (current_core_cycle[fill_cpu] - MSHR.entry[mshr_index].cycle_enqueued);
+		        total_miss_latency += current_miss_latency;
+	        }
+#ifdef BYPASS_DEBUG
+            if (MSHR.entry[mshr_index].instr_id == 2001730)
+                cout << " CATCH !!! instr: " << MSHR.entry[mshr_index].instr_id << " ByP: " << (int) MSHR.entry[mshr_index].l1_bypassed << endl;
+#endif
+
+            MSHR.remove_queue(&MSHR.entry[mshr_index]);
+            MSHR.num_returned--;
+
+            update_fill_cycle();
+        }
+    }
+}
+
+inline void CACHE::merge_with_prefetch(PACKET &mshr_packet, PACKET &queue_packet ) {
+    // ORIGINAL info retainer
+    uint8_t prior_returned = mshr_packet.returned;
+    uint64_t prior_event_cycle = mshr_packet.event_cycle;
+#ifdef BYPASS_L1_LOGIC
+    // uint8_t  prior_bypassed = mshr_packet.bypassed_levels;
+    uint8_t prior_fill = mshr_packet.fill_level;
+    uint8_t prior_l1_bypassed = mshr_packet.l1_bypassed;
+#endif
+#ifdef BYPASS_L2_LOGIC
+    uint8_t prior_l2_bypassed = mshr_packet.l2_bypassed;
+#endif
+#ifdef BYPASS_LLC_LOGIC
+    uint8_t prior_llc_bypassed = mshr_packet.llc_bypassed;
+#endif
+#ifdef DEBUG_PRINT
+    if (warmup_complete[0])
+        cout << "MSHR " << (int)mshr_packet.type << " Q: " << (int)queue_packet.type << endl;
+#endif
+    mshr_packet = queue_packet;
+
+    // restore original retained data
+    mshr_packet.returned = prior_returned;
+    mshr_packet.event_cycle = prior_event_cycle;
+    // mshr_packet.bypassed_levels = prior_bypassed;
+#ifdef BYPASS_L1_LOGIC
+    mshr_packet.fill_level = prior_fill;
+    mshr_packet.l1_bypassed = prior_l1_bypassed;
+#endif
+#ifdef BYPASS_L2_LOGIC
+    mshr_packet.l2_bypassed = prior_l2_bypassed;
+#endif
+#ifdef BYPASS_LLC_LOGIC
+    mshr_packet.llc_bypassed = prior_llc_bypassed;
+#endif
+//     if (cache_type == IS_L2C) {
+//         // === FIX: push bypass LQ deps into L1D MSHR now ===
+//         auto *l1d = (CACHE *) this->upper_level_dcache[cpu];
+//         int l1d_mshr = l1d->check_mshr(&mshr_packet); // same addr, L1D MSHR alive
+//         if (l1d_mshr != -1) {
+//             if (l1d->MSHR.entry[l1d_mshr].type == PREFETCH)
+//                 cout << " PREFETCH PROPAGATE";
+//             // ORIGINAL info retainer
+//             uint8_t prior_returned = l1d->MSHR.entry[l1d_mshr].returned;
+//             uint64_t prior_event_cycle = l1d->MSHR.entry[l1d_mshr].event_cycle;
+// #ifdef BYPASS_L1_LOGIC
+//             uint8_t  prior_bypassed = l1d->MSHR.entry[l1d_mshr].bypassed_levels;
+//             uint8_t prior_fill = l1d->MSHR.entry[l1d_mshr].fill_level;
+// #endif
+//             l1d->MSHR.entry[l1d_mshr] = mshr_packet;
+//             l1d->MSHR.entry[l1d_mshr].returned = prior_returned;
+//             l1d->MSHR.entry[l1d_mshr].event_cycle = prior_event_cycle;
+//             l1d->MSHR.entry[l1d_mshr].bypassed_levels = 0;
+//             mshr_packet.bypassed_levels = 0;
+//         }
+//     }
+
+}
+
+void CACHE::handle_writeback() {
+    // handle write
+    uint32_t writeback_cpu = WQ.entry[WQ.head].cpu;
+    if (writeback_cpu == NUM_CPUS)
+        return;
+
+    // handle the oldest entry
+    if ((WQ.entry[WQ.head].event_cycle <= current_core_cycle[writeback_cpu]) && (WQ.occupancy > 0)) {
+        int index = WQ.head;
+
+        // access cache
+        uint32_t set = get_set(WQ.entry[index].address);
+        int way = check_hit(&WQ.entry[index]);
+
+        if (way >= 0) { // writeback hit (or RFO hit for L1D)
+
+            if (cache_type == IS_LLC) {
+                llc_update_replacement_state(writeback_cpu, set, way, block[set][way].full_addr, WQ.entry[index].ip, 0, WQ.entry[index].type, 1);
+
+            }
+            else
+                update_replacement_state(writeback_cpu, set, way, block[set][way].full_addr, WQ.entry[index].ip, 0, WQ.entry[index].type, 1);
+
+            // COLLECT STATS
+            sim_hit[writeback_cpu][WQ.entry[index].type]++;
+            sim_access[writeback_cpu][WQ.entry[index].type]++;
+
+            // mark dirty
+            block[set][way].dirty = 1;
+
+            if (cache_type == IS_ITLB)
+                WQ.entry[index].instruction_pa = block[set][way].data;
+            else if (cache_type == IS_DTLB)
+                WQ.entry[index].data_pa = block[set][way].data;
+            else if (cache_type == IS_STLB)
+                WQ.entry[index].data = block[set][way].data;
+
+            // check fill level
+            if (WQ.entry[index].fill_level < fill_level) {
+
+                if (WQ.entry[index].instruction)
+                    upper_level_icache[writeback_cpu]->return_data(&WQ.entry[index]);
+                else // data
+                    upper_level_dcache[writeback_cpu]->return_data(&WQ.entry[index]);
+            }
+
+            HIT[WQ.entry[index].type]++;
+            ACCESS[WQ.entry[index].type]++;
+
+            // remove this entry from WQ
+            WQ.remove_queue(&WQ.entry[index]);
+        }
+        else { // writeback miss (or RFO miss for L1D)
+            if (cache_type == IS_L1D) { // RFO miss
+                // check mshr
+                uint8_t miss_handled = 1;
+                int mshr_index = check_mshr(&WQ.entry[index]);
+                if ((mshr_index == -1) && (MSHR.occupancy < MSHR_SIZE)) { // this is a new miss
+                    if(cache_type == IS_LLC) {
+                        // check to make sure the DRAM RQ has room for this LLC RFO miss
+                        if (lower_level->get_occupancy(1, WQ.entry[index].address) == lower_level->get_size(1, WQ.entry[index].address)){
+                            miss_handled = 0;
+                        } else {
+                            add_mshr(&WQ.entry[index]);
+                            lower_level->add_rq(&WQ.entry[index]);
+                        }
+                    // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL
+                    } else {
+                        if (lower_level &&
+                            lower_level->get_occupancy(1, WQ.entry[index].address) == lower_level->get_size(1, WQ.entry[index].address)) {
+                            miss_handled = 0;
+                        } else {
+                            add_mshr(&WQ.entry[index]);
+                            lower_level->add_rq(&WQ.entry[index]);
+                        }
+                    }
+                    // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL
+                    // } else {
+                    //     // add it to mshr (RFO miss)
+                    //     add_mshr(&WQ.entry[index]);
+
+                    //     // add it to the next level's read queue
+                    //     //if (lower_level) // L1D always has a lower level cache
+                    //     lower_level->add_rq(&WQ.entry[index]);
+		            // }
+                } else {
+                    if ((mshr_index == -1) && (MSHR.occupancy == MSHR_SIZE)) { // not enough MSHR resource
+                        // cannot handle miss request until one of MSHRs is available
+                        miss_handled = 0;
+                        STALL[WQ.entry[index].type]++;
+                    }
+                    else if (mshr_index != -1) { // already in-flight miss
+                        // update fill_level
+                        if (WQ.entry[index].fill_level < MSHR.entry[mshr_index].fill_level)
+                            MSHR.entry[mshr_index].fill_level = WQ.entry[index].fill_level;
+                        // update request
+                        if (MSHR.entry[mshr_index].type == PREFETCH) {
+                            merge_with_prefetch(MSHR.entry[mshr_index], WQ.entry[index]);
+                            // uint8_t  prior_returned = MSHR.entry[mshr_index].returned;
+                            // uint64_t prior_event_cycle = MSHR.entry[mshr_index].event_cycle;
+			                // MSHR.entry[mshr_index] = WQ.entry[index];
+                   //
+                            // // in case request is already returned, we should keep event_cycle and retunred variables
+                            // MSHR.entry[mshr_index].returned = prior_returned;
+                            // MSHR.entry[mshr_index].event_cycle = prior_event_cycle;
+                        }
+
+                        MSHR_MERGED[WQ.entry[index].type]++;
+                    }
+                    else { // WE SHOULD NOT REACH HERE
+                        cerr << "[" << NAME << "] MSHR errors" << endl;
+                        assert(0);
+                    }
+                }
+
+                if (miss_handled) {
+
+                    MISS[WQ.entry[index].type]++;
+                    ACCESS[WQ.entry[index].type]++;
+
+                    // remove this entry from WQ
+                    WQ.remove_queue(&WQ.entry[index]);
+                }
+
+            }
+            else {
+                // find victim
+                uint32_t set = get_set(WQ.entry[index].address), way;
+                if (cache_type == IS_LLC) {
+                    way = llc_find_victim(writeback_cpu, WQ.entry[index].instr_id, set, block[set], WQ.entry[index].ip, WQ.entry[index].full_addr, WQ.entry[index].type);
+                }
+                else
+                    way = find_victim(writeback_cpu, WQ.entry[index].instr_id, set, block[set], WQ.entry[index].ip, WQ.entry[index].full_addr, WQ.entry[index].type);
+
+#ifdef LLC_BYPASS
+                if ((cache_type == IS_LLC) && (way == LLC_WAY)) {
+                    cerr << "LLC bypassing for writebacks is not allowed!" << endl;
+                    assert(0);
+                }
+#endif
+
+                uint8_t  do_fill = 1;
+
+                // is this dirty?
+                if (block[set][way].dirty) {
+
+                    // check if the lower level WQ has enough room to keep this writeback request
+                    if (lower_level) {
+                        if (lower_level->get_occupancy(2, block[set][way].address) == lower_level->get_size(2, block[set][way].address)) {
+
+                            // lower level WQ is full, cannot replace this victim
+                            do_fill = 0;
+                            lower_level->increment_WQ_FULL(block[set][way].address);
+                            STALL[WQ.entry[index].type]++;
+
+                        }
+                        else {
+                            PACKET writeback_packet;
+
+                            writeback_packet.fill_level = fill_level << 1;
+                            writeback_packet.cpu = writeback_cpu;
+                            writeback_packet.address = block[set][way].address;
+                            writeback_packet.full_addr = block[set][way].full_addr;
+                            writeback_packet.data = block[set][way].data;
+                            writeback_packet.instr_id = WQ.entry[index].instr_id;
+                            writeback_packet.ip = 0;
+                            writeback_packet.type = WRITEBACK;
+                            writeback_packet.event_cycle = current_core_cycle[writeback_cpu];
+
+                            lower_level->add_wq(&writeback_packet);
+                        }
+                    }
+#ifdef TRUE_SANITY_CHECK
+                    else {
+                        // sanity check
+                        if (cache_type != IS_STLB)
+                            assert(0);
+                    }
+#endif
+                }
+                
+                if (do_fill) {
+                    // update prefetcher
+                    if (cache_type == IS_L1D)
+		      l1d_prefetcher_cache_fill(WQ.entry[index].full_addr, set, way, 0, block[set][way].address<<LOG2_BLOCK_SIZE, WQ.entry[index].pf_metadata);
+                    else if (cache_type == IS_L2C)
+		      WQ.entry[index].pf_metadata = l2c_prefetcher_cache_fill(WQ.entry[index].address<<LOG2_BLOCK_SIZE, set, way, 0,
+									      block[set][way].address<<LOG2_BLOCK_SIZE, WQ.entry[index].pf_metadata);
+                    if (cache_type == IS_LLC)
+		      {
+			cpu = writeback_cpu;
+			WQ.entry[index].pf_metadata =llc_prefetcher_cache_fill(WQ.entry[index].address<<LOG2_BLOCK_SIZE, set, way, 0,
+									       block[set][way].address<<LOG2_BLOCK_SIZE, WQ.entry[index].pf_metadata);
+			cpu = 0;
+		      }
+
+                    // update replacement policy
+                    if (cache_type == IS_LLC) {
+                        llc_update_replacement_state(writeback_cpu, set, way, WQ.entry[index].full_addr, WQ.entry[index].ip, block[set][way].full_addr, WQ.entry[index].type, 0);
+                    }
+                    else
+                        update_replacement_state(writeback_cpu, set, way, WQ.entry[index].full_addr, WQ.entry[index].ip, block[set][way].full_addr, WQ.entry[index].type, 0);
+
+                    // COLLECT STATS
+                    sim_miss[writeback_cpu][WQ.entry[index].type]++;
+                    sim_access[writeback_cpu][WQ.entry[index].type]++;
+
+                    fill_cache(set, way, &WQ.entry[index]);
+
+                    // mark dirty
+                    block[set][way].dirty = 1;
+
+                    // check fill level
+                    if (WQ.entry[index].fill_level < fill_level) {
+
+                        if (WQ.entry[index].instruction)
+                            upper_level_icache[writeback_cpu]->return_data(&WQ.entry[index]);
+                        else // data
+                            upper_level_dcache[writeback_cpu]->return_data(&WQ.entry[index]);
+                    }
+
+                    MISS[WQ.entry[index].type]++;
+                    ACCESS[WQ.entry[index].type]++;
+
+                    // remove this entry from WQ
+                    WQ.remove_queue(&WQ.entry[index]);
+                }
+            }
+        }
+    }
+}
+void CACHE::handle_read() {
+    // handle read
+
+    for (uint16_t i=0; i<MAX_READ; i++) {
+
+      uint16_t read_cpu = RQ.entry[RQ.head].cpu;
+      if (read_cpu == NUM_CPUS)
+      {
+        return;
+      }
+#ifdef BYPASS_DEBUG
+        if (RQ.entry[RQ.head].instr_id == 2001730) {
+            cout << NAME  << " Problem ID" << endl;
+        }
+#endif
+        // handle the oldest entry
+        if ((RQ.entry[RQ.head].event_cycle <= current_core_cycle[read_cpu]) && (RQ.occupancy > 0)) {
+            int index = RQ.head;
+
+            // access cache
+            uint32_t set = get_set(RQ.entry[index].address);
+            int way = check_hit(&RQ.entry[index]);
+
+            if (way >= 0) { // read hit
+
+                if (cache_type == IS_ITLB) {
+                    RQ.entry[index].instruction_pa = block[set][way].data;
+                    if (PROCESSED.occupancy < PROCESSED.SIZE){
+                        char* dst = (char*)&PROCESSED.entry[PROCESSED.tail];
+                        for (size_t i = 0; i < sizeof(PACKET); i += 64) {
+                            __builtin_prefetch(dst + i, 1, 3);
+                        }
+                        PROCESSED.add_queue(&RQ.entry[index]);
+                    } else {
+                        cerr << "ITLB PROCESSED FULL" << endl;
+                        assert(0&&"RETURN IS LOST FOREVER!!!! ");
+                    }
+                }
+                else if (cache_type == IS_DTLB) {
+                    RQ.entry[index].data_pa = block[set][way].data;
+                    if (PROCESSED.occupancy < PROCESSED.SIZE){
+                        char* dst = (char*)&PROCESSED.entry[PROCESSED.tail];
+                        for (size_t i = 0; i < sizeof(PACKET); i += 64) {
+                            __builtin_prefetch(dst + i, 1, 3);
+                        }
+                        PROCESSED.add_queue(&RQ.entry[index]);
+                    } else {
+                        cerr << "DTLB PROCESSED FULL" << endl;
+                        assert(0&&"RETURN IS LOST FOREVER!!!! ");
+                    }
+                }
+                else if (cache_type == IS_STLB)
+                    RQ.entry[index].data = block[set][way].data;
+                else if (cache_type == IS_L1I) {
+                    if (PROCESSED.occupancy < PROCESSED.SIZE){
+                        char* dst = (char*)&PROCESSED.entry[PROCESSED.tail];
+                        for (size_t i = 0; i < sizeof(PACKET); i += 64) {
+                            __builtin_prefetch(dst + i, 1, 3);
+                        }
+                        PROCESSED.add_queue(&RQ.entry[index]);
+                    } else {
+                        cerr << "L1I PROCESSED FULL" << endl;
+                        assert(0&&"RETURN IS LOST FOREVER!!!! ");
+                    }
+                }
+                //else if (cache_type == IS_L1D) {
+                else if ((cache_type == IS_L1D) && (RQ.entry[index].type != PREFETCH)) {
+                    if (PROCESSED.occupancy < PROCESSED.SIZE){
+                        char* dst = (char*)&PROCESSED.entry[PROCESSED.tail];
+                        for (size_t i = 0; i < sizeof(PACKET); i += 64) {
+                            __builtin_prefetch(dst + i, 1, 3);
+                        }
+                        PROCESSED.add_queue(&RQ.entry[index]);
+                        DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                        cout << "[" << NAME << "_RQ_PROCESSED] " << __func__ << " instr_id: " << RQ.entry[index].instr_id << " Read Hit ";
+                        cout << hex << " read: " << RQ.entry[index].address << dec;
+                        cout << " idx: " << MAX_READ;
+                        cout << " RQ ByP: " << (int) RQ.entry[index].l1_bypassed << " type: " << (int)RQ.entry[index].type  << endl; });
+                    } else {
+                        cerr << "L1D PROCESSED FULL" << endl;
+                        assert(0&&"RETURN IS LOST FOREVER!!!! ");
+                    }
+                }
+#ifdef  BYPASS_L1_LOGIC
+                else if ((cache_type == IS_L2C) && (RQ.entry[index].type == LOAD && RQ.entry[index].l1_bypassed == 1 && !RQ.entry[index].instruction)) {
+                    if (PROCESSED.occupancy < PROCESSED.SIZE){
+                        char* dst = (char*)&PROCESSED.entry[PROCESSED.tail];
+                        for (size_t i = 0; i < sizeof(PACKET); i += 64) {
+                            __builtin_prefetch(dst + i, 1, 3);
+                        }
+#ifdef BYPASS_DEBUG
+                        cout << " handle_read_hit: L2C to processed RQ ROB:" << RQ.entry[index].rob_index << "instrID: " << RQ.entry[index].instr_id << " addr: " << RQ.entry[index].address << endl;
+#endif
+
+                        // auto *l1d = (CACHE *) this->upper_level_dcache[cpu];
+                        // uint32_t set = l1d->get_set(RQ.entry[index].address);
+                        // uint32_t way = l1d->find_victim(cpu, RQ.entry[index].instr_id, set, l1d->block[set], RQ.entry[index].ip, RQ.entry[index].full_addr, RQ.entry[index].type);
+                        // l1d->PROCESSED.add_queue(&RQ.entry[index]);
+                        PROCESSED.add_queue(&RQ.entry[index]);
+                        DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                        cout << "[" << NAME << "_RQ_ByP_PROCESSED] " << __func__  << " Read Hit" << " instr_id: " << RQ.entry[index].instr_id ;
+                        dump_req(RQ.entry[index]);
+                            // cout << hex << " read: " << RQ.entry[index].address << dec;
+                        cout << " idx: " << MAX_READ;
+                        // cout << " RQ ByP: " << (int) RQ.entry[index].l1_bypassed << " type: " << (int)RQ.entry[index].type
+                        cout << endl; });
+                    } else {
+                        cerr << "L2C PROCESSED FULL" << endl;
+                        assert(0&&"RETURN IS LOST FOREVER!!!! ");
+                    }
+                }
+#endif
+#ifdef BYPASS_L2_LOGIC
+                else if ((cache_type == IS_LLC) && (RQ.entry[index].type == LOAD && RQ.entry[index].l2_bypassed == 1 && !RQ.entry[index].instruction)) {
+                    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                    cout << "[" << NAME << "_RQ_L2ByP_ret] " << __func__  << " L2 ByP Read Hit => L1D" << " instr_id: " << RQ.entry[index].instr_id ;
+                    dump_req(RQ.entry[index]);
+                    cout << endl; });
+                    upper_level_dcache[read_cpu]->upper_level_dcache[read_cpu]->return_data(&RQ.entry[index]);
+                }
+#endif
+
+                // update prefetcher on load instruction
+                if (RQ.entry[index].type == LOAD) {
+                    if (cache_type == IS_L1D)
+                        l1d_prefetcher_operate(RQ.entry[index].full_addr, RQ.entry[index].ip, 1, RQ.entry[index].type);
+                    else if (cache_type == IS_L2C)
+                        l2c_prefetcher_operate(block[set][way].address<<LOG2_BLOCK_SIZE, RQ.entry[index].ip, 1, RQ.entry[index].type, 0);
+                    else if (cache_type == IS_LLC)
+                    {
+                        cpu = read_cpu;
+                        llc_prefetcher_operate(block[set][way].address<<LOG2_BLOCK_SIZE, RQ.entry[index].ip, 1, RQ.entry[index].type, 0);
+                        cpu = 0;
+                    }
+                }
+
+                // update replacement policy
+                if (cache_type == IS_LLC) {
+                    llc_update_replacement_state(read_cpu, set, way, block[set][way].full_addr, RQ.entry[index].ip, 0, RQ.entry[index].type, 1);
+                }
+                else
+                    update_replacement_state(read_cpu, set, way, block[set][way].full_addr, RQ.entry[index].ip, 0, RQ.entry[index].type, 1);
+
+                // COLLECT STATS
+                sim_hit[read_cpu][RQ.entry[index].type]++;
+                sim_access[read_cpu][RQ.entry[index].type]++;
+
+                // check fill level
+                if (RQ.entry[index].fill_level < fill_level) {
+
+                    if (RQ.entry[index].instruction)
+                        upper_level_icache[read_cpu]->return_data(&RQ.entry[index]);
+                    else // data
+                        upper_level_dcache[read_cpu]->return_data(&RQ.entry[index]);
+                }
+
+                // update prefetch stats and reset prefetch bit
+                if (block[set][way].prefetch) {
+                    pf_useful++;
+                    block[set][way].prefetch = 0;
+                }
+                block[set][way].used = 1;
+
+                HIT[RQ.entry[index].type]++;
+                ACCESS[RQ.entry[index].type]++;
+
+                // remove this entry from RQ
+                RQ.remove_queue(&RQ.entry[index]);
+                reads_available_this_cycle--;
+            } else { // read miss
+                // check mshr
+                uint8_t miss_handled = 1;
+                int mshr_index = check_mshr(&RQ.entry[index]);
+                #if defined(BYPASS_L1D_OnNewMiss) || defined(BYPASS_L2_LOGIC) || defined(BYPASS_LLC_LOGIC)
+                if (warmup_complete[cpu] && (cache_type == IS_L1D || cache_type == IS_L2C || cache_type == IS_LLC) && RQ.entry[index].type == LOAD && mshr_index == -1 && lower_level->RQ.SIZE > lower_level->RQ.occupancy) {
+                    total_ByP_req[read_cpu]++;
+                    ByP_req[read_cpu]++;
+                }
+                #endif
+                #ifdef BYPASS_L1D_OnNewMiss
+                    if (warmup_complete[cpu] && cache_type == IS_L1D && RQ.entry[index].type == LOAD && mshr_index == -1 && lower_level->RQ.SIZE > lower_level->RQ.occupancy && l1d_bypass_operate(cpu, (CACHE*)this, (CACHE*)lower_level, (CACHE*)lower_level->lower_level)) {
+                        // if (warmup_complete[cpu]){
+                            DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                                    cout << "[" << NAME << "_L1_ByP] " << __func__;
+                                    cout << " ";
+                                    dump_req(RQ.entry[index]);
+                                    cout << endl;
+                                };);
+                            RQ.entry[index].l1_bypassed = 1;
+                            RQ.entry[index].fill_level = FILL_L2;
+                            total_ByP_issued[read_cpu]++;
+                            ByP_issued[read_cpu]++;
+                            lower_level->add_rq(&RQ.entry[index]);
+                        // }
+                    } else
+                #endif
+                #ifdef BYPASS_L2_LOGIC
+                if (warmup_complete[cpu] && cache_type == IS_L2C && RQ.entry[index].type == LOAD && !RQ.entry[index].instruction && mshr_index == -1
+                    && RQ.entry[index].l1_bypassed == 0
+                    && lower_level->RQ.SIZE > lower_level->RQ.occupancy
+                    && l2c_bypass_operate(cpu, (CACHE*)upper_level_dcache[cpu], (CACHE*)this, (CACHE*)lower_level)) {
+                        DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                                cout << "[" << NAME << "_L2_ByP] " << __func__;
+                                cout << " ";
+                                dump_req(RQ.entry[index]);
+                                cout << endl;
+                            };);
+                        RQ.entry[index].l2_bypassed = 1;
+                        RQ.entry[index].fill_level = FILL_LLC;
+                        total_ByP_issued[read_cpu]++;
+                        ByP_issued[read_cpu]++;
+                        lower_level->add_rq(&RQ.entry[index]);
+                } else
+                #endif
+                #ifdef BYPASS_LLC_LOGIC
+                if (warmup_complete[cpu] && cache_type == IS_LLC && RQ.entry[index].type == LOAD && mshr_index == -1
+                    && RQ.entry[index].l2_bypassed == 0
+                    && lower_level->RQ.SIZE > lower_level->RQ.occupancy
+                    && llc_bypass_operate(cpu, (CACHE*)lower_level->lower_level, (CACHE*)lower_level, (CACHE*)this)) {
+                        DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                                cout << "[" << NAME << "_LLC_ByP] " << __func__;
+                                cout << " ";
+                                dump_req(RQ.entry[index]);
+                                cout << endl;
+                            };);
+                        RQ.entry[index].llc_bypassed = 1;
+                        RQ.entry[index].fill_level = FILL_DRAM;
+                        total_ByP_issued[read_cpu]++;
+                        ByP_issued[read_cpu]++;
+                        lower_level->add_rq(&RQ.entry[index]);
+                } else
+                #endif
+                if ((mshr_index == -1) && (MSHR.occupancy < MSHR_SIZE)) { // this is a new miss
+                    if(cache_type == IS_LLC){
+                        // check to make sure the DRAM RQ has room for this LLC read miss
+                        if (lower_level->get_occupancy(1, RQ.entry[index].address) == lower_level->get_size(1, RQ.entry[index].address)){
+                            miss_handled = 0;
+                        } else {
+                            add_mshr(&RQ.entry[index]);
+                            if(lower_level) {
+#ifdef BYPASS_DEBUG
+                                if (RQ.entry[index].instr_id == 2001730 || (uint64_t) RQ.entry[index].address == 1514623703326)
+                                    cout << " LLC MSHR ENTRY MADE, THIS IS THE PROBLEM PACKET RETURNED!!!!";
+#endif
+                                DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                                    cout << "[" << NAME << "_MSHR_NEW_MISS] " << __func__;
+                                    cout << " and lower request to RQ ";
+                                    dump_req(RQ.entry[index]);
+                                    cout << endl;
+                                };);
+                                lower_level->add_rq(&RQ.entry[index]);
+                            }
+                        }
+                    } else {
+                        // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL
+                        if (lower_level && lower_level->get_occupancy(1, RQ.entry[index].address) == lower_level->get_size(1, RQ.entry[index].address)) {
+                            miss_handled = 0;
+                        } else {
+
+                        // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL // VB FIX WHERE ON RQ FULL WE CANNOT SEND REQUEST TO NXT LVL
+                        // add it to mshr (read miss)
+                            // it this is L2C and packet is bypass L1D we show details
+#ifdef BYPASS_DEBUG
+                            if (IS_L2C && RQ.entry[index].l1_bypassed == 1 && RQ.entry[index].type == LOAD) {
+                                cout << " RQ miss will add to MSHR instr_ID: " << RQ.entry[index].instr_id << " addr: " << RQ.entry[index].address << endl;
+                            }
+                            if (IS_L2C && RQ.entry[index].l1_bypassed == 1 && RQ.entry[index].type == LOAD && RQ.entry[index].instr_id == 2001730) {
+                                cout << " PROBLEM!!!! : " << RQ.entry[index].instr_id << " addr: " << RQ.entry[index].address << endl;
+                            }
+#endif
+
+                            add_mshr(&RQ.entry[index]);
+                            DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                                cout << "[" << NAME << "_MSHR_NEW_MISS] " << __func__;
+                                cout << " and lower request to RQ ";
+                                dump_req(RQ.entry[index]);
+                                cout << endl;
+                            };);
+                            // add it to the next level's read queue
+                            if (lower_level)
+                                lower_level->add_rq(&RQ.entry[index]);
+                            else { // this is the last level
+                                if (cache_type == IS_STLB) {
+                                    // TODO: need to differentiate page table walk and actual swap
+                                    // emulate page table walk
+                                    uint64_t pa = va_to_pa(read_cpu, RQ.entry[index].instr_id, RQ.entry[index].full_addr, RQ.entry[index].address);
+
+                                    RQ.entry[index].data = pa >> LOG2_PAGE_SIZE;
+                                    RQ.entry[index].event_cycle = current_core_cycle[read_cpu];
+                                    return_data(&RQ.entry[index]);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    if ((mshr_index == -1) && (MSHR.occupancy == MSHR_SIZE)) { // not enough MSHR resource
+                        // cannot handle miss request until one of MSHRs is available
+                        miss_handled = 0;
+                        STALL[RQ.entry[index].type]++;
+                    }
+                    else if (mshr_index != -1) { // already in-flight miss
+#ifdef BYPASS_DEBUG
+                        if (RQ.entry[index].l1_bypassed == 1 && RQ.entry[index].type != LOAD) {
+                            cerr << NAME << " Type: " << RQ.entry[index].type << " addr: " << RQ.entry[index].address << "instrID: " << RQ.entry[index].instr_id << " ROB: " << RQ.entry[index].rob_index << endl;
+                            assert(0&&"NOT EXPECTED NON LOAD BYPASS MERGE ... ");
+                        }
+                        if (RQ.entry[index].l1_bypassed == 1 && RQ.entry[index].type == LOAD) {
+                            cerr << NAME << " MERGING BYPASSED RQ into existing MSHR: " << NAME << RQ.entry[index].type << " addr: " << RQ.entry[index].address << "instrID: " << RQ.entry[index].instr_id << " ROB: " << RQ.entry[index].rob_index << endl;
+                        }
+#endif
+                        DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                            cout << "[" << NAME << "_MSHR_MERGING] " << __func__;
+                            cout << " RQ ";
+                            dump_req(RQ.entry[index]);
+                            cout << " MSHR ";
+                            dump_req(MSHR.entry[mshr_index]);
+                            cout << endl;
+                        };);
+                        // mark merged consumer
+                        if (RQ.entry[index].type == RFO) {
+                            if (RQ.entry[index].l1_bypassed)
+                                assert(0&&"RFO BYPASS NOT EXPECTED ... ");
+                            if (RQ.entry[index].tlb_access) {
+                                uint16_t sq_index = RQ.entry[index].sq_index;
+                                MSHR.entry[mshr_index].store_merged = 1;
+                                MSHR.entry[mshr_index].sq_index_depend_on_me.insert (sq_index);
+				                MSHR.entry[mshr_index].sq_index_depend_on_me.join (RQ.entry[index].sq_index_depend_on_me, SQ_SIZE);
+                            }
+                            if (RQ.entry[index].load_merged) {
+                                //uint32_t lq_index = RQ.entry[index].lq_index;
+                                MSHR.entry[mshr_index].load_merged = 1;
+                                //MSHR.entry[mshr_index].lq_index_depend_on_me[lq_index] = 1;
+				                MSHR.entry[mshr_index].lq_index_depend_on_me.join (RQ.entry[index].lq_index_depend_on_me, LQ_SIZE);
+                            }
+                        } else {
+                            if (RQ.entry[index].instruction) {
+#ifdef BYPASS_DEBUG
+                                if (RQ.entry[index].l1_bypassed == 1) {
+                                    cerr << " THIS IS WRONG, WHY ByP INSTR??? " << NAME << RQ.entry[index].type << " addr: " << RQ.entry[index].address << "instrID: " << RQ.entry[index].instr_id << " ROB: " << RQ.entry[index].rob_index << endl;
+                                }
+#endif
+
+                                uint16_t rob_index = RQ.entry[index].rob_index;
+                                MSHR.entry[mshr_index].instr_merged = 1;
+                                MSHR.entry[mshr_index].rob_index_depend_on_me.insert (rob_index);
+
+                                if (RQ.entry[index].instr_merged) {
+				                    MSHR.entry[mshr_index].rob_index_depend_on_me.join (RQ.entry[index].rob_index_depend_on_me, ROB_SIZE);
+                                }
+                            } else {
+#ifdef BYPASS_DEBUG
+                                if (RQ.entry[index].l1_bypassed == 1) {
+                                    cout << " NOW ByP data RQ " << "LQ" << RQ.entry[index].lq_index << "SQ" << RQ.entry[index].sq_index<< "merging with MSHR " << NAME << RQ.entry[index].type << " addr: " << RQ.entry[index].address << "instrID: " << RQ.entry[index].instr_id << " ROB: " << RQ.entry[index].rob_index << endl;
+                                }
+#endif
+
+                                uint16_t lq_index = RQ.entry[index].lq_index;
+
+                                MSHR.entry[mshr_index].load_merged = 1;
+                                MSHR.entry[mshr_index].lq_index_depend_on_me.insert (lq_index);
+
+                                MSHR.entry[mshr_index].lq_index_depend_on_me.join (RQ.entry[index].lq_index_depend_on_me, LQ_SIZE);
+                                if (RQ.entry[index].store_merged) {
+#ifdef BYPASS_DEBUG
+                                    if (RQ.entry[index].l1_bypassed == 1) {
+                                        cout << " ByP HAS merged store " << NAME << RQ.entry[index].type << " addr: " << RQ.entry[index].address << "instrID: " << RQ.entry[index].instr_id << " ROB: " << RQ.entry[index].rob_index << endl;
+                                    }
+#endif
+
+                                    MSHR.entry[mshr_index].store_merged = 1;
+				                    MSHR.entry[mshr_index].sq_index_depend_on_me.join (RQ.entry[index].sq_index_depend_on_me, SQ_SIZE);
+                                }
+                            }
+                            DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                                cout << "[" << NAME << "_MSHR_POST_MERGE] " << __func__;
+                                dump_req(MSHR.entry[mshr_index]);
+                                cout <<  endl;
+
+                            };);
+                        }
+
+                        // update fill_level
+                        if (RQ.entry[index].fill_level < MSHR.entry[mshr_index].fill_level) {
+#ifdef BYPASS_DEBUG
+                            if (RQ.entry[index].l1_bypassed == 1 || MSHR.entry[mshr_index].l1_bypassed == 1) {
+                                cout << "Updating ByP fill lvl: " << "rq instrID: " << RQ.entry[index].instr_id << "RQ: " << RQ.entry[index].fill_level << " MSHR: " <<  MSHR.entry[mshr_index].fill_level << " Mtype: " << MSHR.entry[mshr_index].type << endl;
+                            }
+#endif
+                            MSHR.entry[mshr_index].fill_level = RQ.entry[index].fill_level;
+
+                        }
+#ifdef BYPASS_L1_LOGIC
+                        // Reset ByP if mismatch — non-bypass path will handle deps at fill time
+                        if (cache_type == IS_L2C) {
+                            if (RQ.entry[index].l1_bypassed != MSHR.entry[mshr_index].l1_bypassed) {
+                                //  RQ.entry[index].l1_bypassed = 0;
+                                // MSHR.entry[mshr_index].fill_level = 1;
+                                if (MSHR.entry[mshr_index].type != PREFETCH) {
+                                    // Push bypass LQ(s) directly to L1D MSHR (only if L1D has one)
+                                    auto *l1d = (CACHE *) this->upper_level_dcache[cpu];
+                                    bool found_l1d_mshr = false;
+                                    for (uint16_t m = 0; m < l1d->MSHR_SIZE; m++) {
+                                        if (l1d->MSHR.entry[m].address == MSHR.entry[mshr_index].address) {
+                                            found_l1d_mshr = true;
+                                            l1d->MSHR.entry[m].load_merged = 1;
+                                            l1d->MSHR.entry[m].lq_index_depend_on_me.insert(
+                                                RQ.entry[index].lq_index);
+                                            if (RQ.entry[index].load_merged) {
+                                                ITERATE_SET(dep, RQ.entry[index].lq_index_depend_on_me, LQ_SIZE) {
+                                                    l1d->MSHR.entry[m].lq_index_depend_on_me.insert(dep);
+                                                }
+                                            }
+                                            DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[l1d->MSHR.cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                                                cout << "[" << NAME << "_MSHR_POST_MERGE] " << __func__;
+                                                cout << " before rm l1d->MSHR.entry.lq_index: " << l1d->MSHR.entry[m].lq_index;
+                                                dump_req(l1d->MSHR.entry[m]);
+                                                cout << endl;
+                                            };);
+                                            l1d->MSHR.entry[m].lq_index_depend_on_me.remove(
+                                                l1d->MSHR.entry[m].lq_index);
+                                            DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[l1d->MSHR.cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                                                cout << "[" << NAME << "_MSHR_POST_MERGE] " << __func__;
+                                                cout << " after rm l1d->MSHR.entry.lq_index: " << l1d->MSHR.entry[m].lq_index;
+                                                dump_req(l1d->MSHR.entry[m]);
+                                                cout << endl;
+
+                                            };);
+                                            break;
+                                        }
+                                    }
+                                    if (found_l1d_mshr) {
+                                        // L1D has MSHR — safe to redirect fill through L1D
+                                        RQ.entry[index].l1_bypassed = 0;
+                                        MSHR.entry[mshr_index].l1_bypassed = 0;
+                                        MSHR.entry[mshr_index].fill_level = 1;
+                                    }
+                                    // else: L1D has no MSHR (was bypassed). Keep l1_bypassed=1
+                                    // so packet completes via L2C.PROCESSED → CPU.
+                                } else if (MSHR.entry[mshr_index].fill_level < fill_level) {
+                                    // PREFETCH propagating to L1D → L1D has prefetch MSHR
+                                    // Use normal return path, not bypass
+                                    RQ.entry[index].l1_bypassed = 0;
+                                }
+
+                                // // === FIX: push bypass LQ deps into L1D MSHR now ===
+                                // auto *l1d = (CACHE *) this->upper_level_dcache[cpu];
+                                // int l1d_mshr = l1d->check_mshr(&MSHR.entry[mshr_index]); // same addr, L1D MSHR alive
+                                // if (l1d_mshr != -1) {
+                                //     l1d->MSHR.entry[l1d_mshr].load_merged = 1;
+                                //     l1d->MSHR.entry[l1d_mshr].lq_index_depend_on_me.join(
+                                //         RQ.entry[index].lq_index_depend_on_me, LQ_SIZE);
+                                //     // RQ entry has the bypassed instr's LQ index + any merges it accumulated
+                                //     l1d->MSHR.entry[l1d_mshr].lq_index_depend_on_me.insert(
+                                //         RQ.entry[index].lq_index);
+                                // }
+                                DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")){
+                                    cout << "["<< NAME << "ByP MISMATCH] " << __func__;
+                                     cout << " RQ";
+                                     dump_req(RQ.entry[index]);
+                                     cout << " MSHR";
+                                     dump_req(MSHR.entry[mshr_index]);
+                                     cout << endl;});
+#ifdef DEBUG_PRINT
+                                // cout << "LQ IS LOCATED THERE???? 101: " << MSHR.entry[mshr_index].lq_index_depend_on_me.search(101);
+#endif
+                            } else {
+                                DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                                    cout << "["<< NAME << " ByP NOT mismatch] " << __func__;
+                                    cout << " RQ";
+                                    dump_req(RQ.entry[index]);
+                                    cout << " MSHR";
+                                    dump_req(MSHR.entry[mshr_index]);
+                                    cout << endl;});
+                            }
+                        }
+#endif
+#ifdef BYPASS_L2_LOGIC
+                        // Reset L2 ByP if mismatch at LLC
+                        if (cache_type == IS_LLC) {
+                            if (RQ.entry[index].l2_bypassed != MSHR.entry[mshr_index].l2_bypassed) {
+                                if (MSHR.entry[mshr_index].type != PREFETCH) {
+                                    // Push bypass LQ(s) directly to L2C MSHR
+                                    auto *l2c = (CACHE *) this->upper_level_dcache[cpu];
+                                    bool found_l2c_mshr = false;
+                                    for (uint16_t m = 0; m < l2c->MSHR_SIZE; m++) {
+                                        if (l2c->MSHR.entry[m].address == MSHR.entry[mshr_index].address) {
+                                            found_l2c_mshr = true;
+                                            l2c->MSHR.entry[m].load_merged = 1;
+                                            l2c->MSHR.entry[m].lq_index_depend_on_me.insert(
+                                                RQ.entry[index].lq_index);
+                                            if (RQ.entry[index].load_merged) {
+                                                ITERATE_SET(dep, RQ.entry[index].lq_index_depend_on_me, LQ_SIZE) {
+                                                    l2c->MSHR.entry[m].lq_index_depend_on_me.insert(dep);
+                                                }
+                                            }
+                                            l2c->MSHR.entry[m].lq_index_depend_on_me.remove(
+                                                l2c->MSHR.entry[m].lq_index);
+                                            break;
+                                        }
+                                    }
+                                    if (found_l2c_mshr) {
+                                        // L2C has MSHR — safe to redirect fill through L2C
+                                        RQ.entry[index].l2_bypassed = 0;
+                                        MSHR.entry[mshr_index].l2_bypassed = 0;
+                                        MSHR.entry[mshr_index].fill_level = FILL_L2;
+                                    }
+                                    // else: L2C has no MSHR (was bypassed). Keep l2_bypassed=1
+                                    // so packet completes via LLC bypass return → L1D.
+                                } else if (MSHR.entry[mshr_index].fill_level < fill_level) {
+                                    RQ.entry[index].l2_bypassed = 0;
+                                }
+                                DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")){
+                                    cout << "["<< NAME << " L2 ByP MISMATCH] " << __func__;
+                                     cout << " RQ";
+                                     dump_req(RQ.entry[index]);
+                                     cout << " MSHR";
+                                     dump_req(MSHR.entry[mshr_index]);
+                                     cout << endl;});
+                            }
+                        }
+#endif
+
+                        // update request
+                        if (MSHR.entry[mshr_index].type == PREFETCH) {
+                            // RBERA: add late prefetch stats here
+                            pf_late++;
+                            merge_with_prefetch(MSHR.entry[mshr_index], RQ.entry[index]);
+#ifdef BYPASS_L1_LOGIC
+                            // merge_with_prefetch restores PREFETCH's bypass=0,
+                            // but the LOAD taking over may be bypassed. Restore LOAD's flag.
+                            if (RQ.entry[index].l1_bypassed)
+                                MSHR.entry[mshr_index].l1_bypassed = 1;
+#endif
+#ifdef BYPASS_L2_LOGIC
+                            if (RQ.entry[index].l2_bypassed)
+                                MSHR.entry[mshr_index].l2_bypassed = 1;
+#endif
+#ifdef BYPASS_LLC_LOGIC
+                            if (RQ.entry[index].llc_bypassed)
+                                MSHR.entry[mshr_index].llc_bypassed = 1;
+#endif
+                            // uint8_t  prior_returned = MSHR.entry[mshr_index].returned;
+                            // uint64_t prior_event_cycle = MSHR.entry[mshr_index].event_cycle;
+                            // MSHR.entry[mshr_index] = RQ.entry[index];
+                            // // in case request is already returned, we should keep event_cycle and retunred variables
+                            // MSHR.entry[mshr_index].returned = prior_returned;
+                            // MSHR.entry[mshr_index].event_cycle = prior_event_cycle;
+                        } else {
+                            if (RQ.entry[index].instruction) {
+                                MSHR.entry[mshr_index].rob_index_depend_on_me.insert(RQ.entry[index].rob_index);
+                                MSHR.entry[mshr_index].instr_merged = 1;
+                            } else if (RQ.entry[index].type == LOAD) {
+                                MSHR.entry[mshr_index].lq_index_depend_on_me.insert(RQ.entry[index].lq_index);
+                                MSHR.entry[mshr_index].load_merged = 1;
+                            } else if (RQ.entry[index].type == RFO) {
+                                MSHR.entry[mshr_index].sq_index_depend_on_me.insert(RQ.entry[index].sq_index);
+                                MSHR.entry[mshr_index].store_merged = 1;
+                            }
+                        }
+                        MSHR_MERGED[RQ.entry[index].type]++;
+                    }
+                    else { // WE SHOULD NOT REACH HERE
+                        cerr << "[" << NAME << "] MSHR errors" << endl;
+                        assert(0);
+                    }
+                }
+
+                if (miss_handled) {
+                    // update prefetcher on load instruction
+		            if (RQ.entry[index].type == LOAD) {
+                        if (cache_type == IS_L1D)
+                            l1d_prefetcher_operate(RQ.entry[index].full_addr, RQ.entry[index].ip, 0, RQ.entry[index].type);
+                        if (cache_type == IS_L2C)
+			                l2c_prefetcher_operate(RQ.entry[index].address<<LOG2_BLOCK_SIZE, RQ.entry[index].ip, 0, RQ.entry[index].type, 0);
+                        if (cache_type == IS_LLC){
+            			    cpu = read_cpu;
+			                llc_prefetcher_operate(RQ.entry[index].address<<LOG2_BLOCK_SIZE, RQ.entry[index].ip, 0, RQ.entry[index].type, 0);
+                            cpu = 0;
+                        }
+                    }
+                    MISS[RQ.entry[index].type]++;
+                    ACCESS[RQ.entry[index].type]++;
+                    // remove this entry from RQ
+                    RQ.remove_queue(&RQ.entry[index]);
+		            reads_available_this_cycle--;
+                }
+            }
+        } else {
+            // cerr << "No read requests to handle or read request not ready!" << endl;
+            return;
+        }
+	    if(reads_available_this_cycle == 0){
+	        return;
+	    }
+    }
+}
+
+void CACHE::handle_prefetch() {
+    // handle prefetch
+    for (uint16_t i=0; i<MAX_READ; i++) {
+        uint16_t prefetch_cpu = PQ.entry[PQ.head].cpu;
+        if (prefetch_cpu == NUM_CPUS){
+            return;
+        }
+        // handle the oldest entry
+        if ((PQ.entry[PQ.head].event_cycle <= current_core_cycle[prefetch_cpu]) && (PQ.occupancy > 0)) {
+            int index = PQ.head;
+
+            // access cache
+            uint32_t set = get_set(PQ.entry[index].address);
+            int way = check_hit(&PQ.entry[index]);
+
+            if (way >= 0) { // prefetch hit
+                // update replacement policy
+                if (cache_type == IS_LLC) {
+                    llc_update_replacement_state(prefetch_cpu, set, way, block[set][way].full_addr, PQ.entry[index].ip, 0, PQ.entry[index].type, 1);
+
+                }
+                else
+                    update_replacement_state(prefetch_cpu, set, way, block[set][way].full_addr, PQ.entry[index].ip, 0, PQ.entry[index].type, 1);
+                // COLLECT STATS
+                sim_hit[prefetch_cpu][PQ.entry[index].type]++;
+                sim_access[prefetch_cpu][PQ.entry[index].type]++;
+		        // run prefetcher on prefetches from higher caches
+                if(PQ.entry[index].pf_origin_level < fill_level){
+                    if (cache_type == IS_L1D)
+                        l1d_prefetcher_operate(PQ.entry[index].full_addr, PQ.entry[index].ip, 1, PREFETCH);
+                    else if (cache_type == IS_L2C)
+                        PQ.entry[index].pf_metadata = l2c_prefetcher_operate(block[set][way].address<<LOG2_BLOCK_SIZE, PQ.entry[index].ip, 1, PREFETCH, PQ.entry[index].pf_metadata);
+                    else if (cache_type == IS_LLC){
+                        cpu = prefetch_cpu;
+                        PQ.entry[index].pf_metadata = llc_prefetcher_operate(block[set][way].address<<LOG2_BLOCK_SIZE, PQ.entry[index].ip, 1, PREFETCH, PQ.entry[index].pf_metadata);
+                        cpu = 0;
+                    }
+                }
+                // check fill level
+                if (PQ.entry[index].fill_level < fill_level) {
+                    if (PQ.entry[index].instruction)
+                        upper_level_icache[prefetch_cpu]->return_data(&PQ.entry[index]);
+                    else // data
+                        upper_level_dcache[prefetch_cpu]->return_data(&PQ.entry[index]);
+                }
+                HIT[PQ.entry[index].type]++;
+                ACCESS[PQ.entry[index].type]++;
+                // remove this entry from PQ
+                PQ.remove_queue(&PQ.entry[index]);
+		        reads_available_this_cycle--;
+            }
+            else { // prefetch miss
+                DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[prefetch_cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                cout << "[" << NAME << "_PQ_miss] " << __func__ << (int)this->cache_type;
+                cout << " instr_id: " << PQ.entry[index].instr_id << " addr: " << hex << PQ.entry[index].address;
+                cout << " full_addr: " << PQ.entry[index].full_addr << dec << " fill_level: " << (int) PQ.entry[index].fill_level;
+                cout << " cy: " << PQ.entry[index].event_cycle << endl; });
+
+                // check mshr
+                uint8_t miss_handled = 1;
+                int mshr_index = check_mshr(&PQ.entry[index]);
+
+                if ((mshr_index == -1) && (MSHR.occupancy < MSHR_SIZE)) { // this is a new miss
+
+                    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[PQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                    cout << "[" << NAME << "_PQ] " <<  __func__ << " want to add instr_id: " << PQ.entry[index].instr_id << " addr: " << hex << PQ.entry[index].address;
+                    cout << " full_addr: " << PQ.entry[index].full_addr << dec;
+                    cout << " occup: " << lower_level->get_occupancy(3, PQ.entry[index].address) << " SIZE: " << lower_level->get_size(3, PQ.entry[index].address) << endl; });
+
+                    // first check if the lower level PQ is full or not
+                    // this is possible since multiple prefetchers can exist at each level of caches
+                    if (lower_level) {
+                        if (cache_type == IS_LLC) {
+                            if (lower_level->get_occupancy(1, PQ.entry[index].address) == lower_level->get_size(1, PQ.entry[index].address))
+                                miss_handled = 0;
+                            else {
+                                // run prefetcher on prefetches from higher caches
+                                if(PQ.entry[index].pf_origin_level < fill_level){
+                                    if (cache_type == IS_LLC){
+                                        cpu = prefetch_cpu;
+                                        PQ.entry[index].pf_metadata = llc_prefetcher_operate(PQ.entry[index].address<<LOG2_BLOCK_SIZE, PQ.entry[index].ip, 0, PREFETCH, PQ.entry[index].pf_metadata);
+                                        cpu = 0;
+                                    }
+                                }
+
+                                // add it to MSHRs if this prefetch miss will be filled to this cache level
+                                if (PQ.entry[index].fill_level <= fill_level)
+                                    add_mshr(&PQ.entry[index]);
+                                lower_level->add_rq(&PQ.entry[index]); // add it to the DRAM RQ
+                            }
+                        } else {
+                            if (lower_level->get_occupancy(3, PQ.entry[index].address) == lower_level->get_size(3, PQ.entry[index].address))
+                                miss_handled = 0;
+                            else {
+                                // run prefetcher on prefetches from higher caches
+                                if(PQ.entry[index].pf_origin_level < fill_level) {
+                                    if (cache_type == IS_L1D)
+                                        l1d_prefetcher_operate(PQ.entry[index].full_addr, PQ.entry[index].ip, 0, PREFETCH);
+                                    if (cache_type == IS_L2C)
+                                        PQ.entry[index].pf_metadata = l2c_prefetcher_operate(PQ.entry[index].address<<LOG2_BLOCK_SIZE, PQ.entry[index].ip, 0, PREFETCH, PQ.entry[index].pf_metadata);
+                                }
+                                // add it to MSHRs if this prefetch miss will be filled to this cache level
+                                if (PQ.entry[index].fill_level <= fill_level)
+                                    add_mshr(&PQ.entry[index]);
+
+                                int success = lower_level->add_pq(&PQ.entry[index]); // add it to the DRAM RQ
+                                if (success == -2) {
+                                    assert(0&&" PQ added MSHR && lower lvl add_pq FAILURE!!!");
+                                }
+			                }
+		                }
+		            }
+                } else {
+                    if ((mshr_index == -1) && (MSHR.occupancy == MSHR_SIZE)) { // not enough MSHR resource
+                        // TODO: should we allow prefetching with lower fill level at this case?
+                        // cannot handle miss request until one of MSHRs is available
+                        miss_handled = 0;
+                        STALL[PQ.entry[index].type]++;
+                    } else if (mshr_index != -1) { // already in-flight miss
+
+                        // WE SIMPLY DO NOT HANDLE IT THIS TIME ... LET IT IGNORE ...
+
+                        // no need to update request except fill_level
+                        // update fill_level
+                        // if (PQ.entry[index].fill_level < MSHR.entry[mshr_index].fill_level && MSHR.entry[mshr_index].type == PREFETCH)// VB fix: THIS IS A PROBLEM IF WE HAVE ALREADY THIS IN FLGIHT AND INFLIGHT BEING THE DEMAND REQUEST. THUS,
+                        //     MSHR.entry[mshr_index].fill_level = PQ.entry[index].fill_level;
+                        if (PQ.entry[index].fill_level < MSHR.entry[mshr_index].fill_level) {
+                            if (MSHR.entry[mshr_index].type == PREFETCH) {
+                                MSHR.entry[mshr_index].fill_level = PQ.entry[index].fill_level;
+                            }
+                    #ifdef BYPASS_L1_LOGIC
+                        else if (MSHR.entry[mshr_index].l1_bypassed == 1) {
+                            // PQ wants fill=1 but MSHR is bypass LOAD with no L1D MSHR.
+                            // Downgrade fill_level so return_data reaches L1D,
+                            // BUT only if L1D has an MSHR for this address (from prefetch).
+                            auto *l1d = (CACHE *) this->upper_level_dcache[cpu];
+                            if (l1d->probe_mshr(&PQ.entry[index]) != -1) {
+                                // L1D has MSHR (prefetch) — safe to redirect through L1D
+                                MSHR.entry[mshr_index].fill_level = PQ.entry[index].fill_level;
+                                MSHR.entry[mshr_index].l1_bypassed = 0;
+                            }
+                            // else: no L1D MSHR — keep ByP=1, complete via L2C.PROCESSED
+                        }
+                    #endif
+                    #ifdef BYPASS_L2_LOGIC
+                        else if (MSHR.entry[mshr_index].l2_bypassed == 1) {
+                            auto *l2c = (CACHE *) this->upper_level_dcache[cpu];
+                            if (l2c->probe_mshr(&PQ.entry[index]) != -1) {
+                                MSHR.entry[mshr_index].fill_level = PQ.entry[index].fill_level;
+                                MSHR.entry[mshr_index].l2_bypassed = 0;
+                            }
+                        }
+                    #endif
+                        }
+                        MSHR_MERGED[PQ.entry[index].type]++;
+                        DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[prefetch_cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                        cout << "[" << NAME << "] " << __func__ << " mshr merged";
+                        cout << " instr_id: " << PQ.entry[index].instr_id << " prior_id: " << MSHR.entry[mshr_index].instr_id;
+                        dump_req(PQ.entry[index]);
+                        cout << " MSHR: " ;
+                        dump_req(MSHR.entry[mshr_index]);
+                        cout << " cy: " << MSHR.entry[mshr_index].event_cycle << endl; });
+                    } else { // WE SHOULD NOT REACH HERE
+                        cerr << "[" << NAME << "] MSHR errors" << endl;
+                        assert(0);
+                    }
+                }
+                if (miss_handled) {
+                    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[prefetch_cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                    cout << "[" << NAME << "] " << __func__ << " prefetch miss handled";
+                    cout << " instr_id: " << PQ.entry[index].instr_id << " addr: " << hex << PQ.entry[index].address;
+                    cout << " full_addr: " << PQ.entry[index].full_addr << dec << " fill_level: " << (int)PQ.entry[index].fill_level;
+                    cout << " cy: " << PQ.entry[index].event_cycle << endl; });
+                    MISS[PQ.entry[index].type]++;
+                    ACCESS[PQ.entry[index].type]++;
+
+                    // remove this entry from PQ
+                    PQ.remove_queue(&PQ.entry[index]);
+		            reads_available_this_cycle--;
+                }
+            }
+        } else{
+	        return;
+	    }
+        if(reads_available_this_cycle == 0) {
+            return;
+        }
+    }
+}
+
+
+void CACHE::operate() {
+    // print RQ MSHR head index instruction id
+#ifdef BYPASS_DEBUG
+    if (IS_LLC && (RQ.entry[RQ.head].instr_id == 2001730 || MSHR.entry[MSHR.head].instr_id == 2001731)) {
+        cout << NAME << " HAS THE PROBLEM ENTRY!!!" << " RQ idx: " << RQ.head << " MSHR idx: " << MSHR.head << endl;
+    }
+#endif
+   if (warmup_complete[cpu]) {
+
+        /* ---- α = total accesses at this level ---- */
+        uint64_t α = 0;
+        for (int t = 0; t < NUM_TYPES; t++)
+            α = sim_access[cpu][t];
+
+        /* ---- hit_active: requests in H-cycle phase ---- */
+        bool hit_active = (RQ.occupancy | WQ.occupancy | PQ.occupancy) > 0;
+
+        /* ---- miss_active: outstanding miss penalty ---- */
+#ifdef LPM_STRICT_MISS
+        /* Paper-exact: miss-access cycles end at data return.
+         * Count only INFLIGHT MSHR entries (returned != COMPLETED).
+         * COMPLETED entries are in fill phase, not miss penalty.
+         * Cost: O(MSHR_SIZE) per cycle. MSHR_SIZE typically 8-16. */
+        bool miss_active = false;
+        for (uint16_t i = 0; i < MSHR_SIZE; i++) {
+            if (MSHR.entry[i].address && MSHR.entry[i].returned != COMPLETED) {
+                miss_active = true;
+                break;
+            }
+        }
+#else
+        /* Simple: any MSHR occupancy.
+         * Includes returned-not-filled → overestimates m by
+         * ~LATENCY cycles per fill event. Conservative.            */
+        bool miss_active = (MSHR.occupancy > 0);
+#endif
+
+        /* ---- bypass detection (L2C and LLC) ---- */
+        bool has_byp = false;
+#ifdef BYPASS_L1_LOGIC
+        if (cache_type == IS_L2C) {
+            for (uint16_t i = 0; i < MSHR_SIZE; i++) {
+                if (MSHR.entry[i].address && MSHR.entry[i].l1_bypassed > 0) {
+                    has_byp = true;
+                    break;
+                }
+            }
+        }
+#endif
+#ifdef BYPASS_L2_LOGIC
+        if (cache_type == IS_LLC) {
+            for (uint16_t i = 0; i < MSHR_SIZE; i++) {
+                if (MSHR.entry[i].address && MSHR.entry[i].l2_bypassed > 0) {
+                    has_byp = true;
+                    break;
+                }
+            }
+        }
+#endif
+#ifdef BYPASS_LLC_LOGIC
+        if (cache_type == IS_LLC) {
+            for (uint16_t i = 0; i < MSHR_SIZE; i++) {
+                if (MSHR.entry[i].address && MSHR.entry[i].llc_bypassed > 0) {
+                    has_byp = true;
+                    break;
+                }
+            }
+        }
+#endif
+
+        /* ---- tick + update cached metrics ---- */
+        lpm_operate(cpu, cache_type, hit_active, miss_active,
+                    α, has_byp);
+    }
+    /* >>> end LPM <<< */
+    handle_fill();
+    handle_writeback();
+    reads_available_this_cycle = MAX_READ;
+    handle_read();
+    if (PQ.occupancy && (reads_available_this_cycle > 0))
+        handle_prefetch();
+}
+
+uint32_t CACHE::get_set(const uint64_t address) {
+    return (uint32_t) (address & ((1 << lg2(NUM_SET)) - 1));
+}
+
+uint32_t CACHE::get_way(const uint64_t address, const uint32_t set) {
+    for (uint32_t way=0; way<NUM_WAY; way++) {
+        if (block[set][way].valid && (block[set][way].tag == address))
+            return way;
+    }
+
+    return NUM_WAY;
+}
+
+void CACHE::fill_cache(const uint32_t set, const uint32_t way, PACKET *packet) {
+#ifdef TRUE_SANITY_CHECK
+    if (cache_type == IS_ITLB) {
+        if (packet->data == 0)
+            assert(0);
+    }
+
+    if (cache_type == IS_DTLB) {
+        if (packet->data == 0)
+            assert(0);
+    }
+
+    if (cache_type == IS_STLB) {
+        if (packet->data == 0)
+            assert(0);
+    }
+#endif
+    if (block[set][way].prefetch && (block[set][way].used == 0))
+        pf_useless++;
+
+    if (block[set][way].valid == 0)
+        block[set][way].valid = 1;
+    block[set][way].dirty = 0;
+    block[set][way].prefetch = (packet->type == PREFETCH) ? 1 : 0;
+    block[set][way].used = 0;
+
+    if (block[set][way].prefetch)
+        pf_fill++;
+
+    // block[set][way].delta = packet->delta;
+    // block[set][way].depth = packet->depth;
+    // block[set][way].signature = packet->signature;
+    // block[set][way].confidence = packet->confidence;
+
+    block[set][way].tag = packet->address;
+    block[set][way].address = packet->address;
+    block[set][way].full_addr = packet->full_addr;
+    block[set][way].data = packet->data;
+    block[set][way].cpu = packet->cpu;
+    block[set][way].instr_id = packet->instr_id;
+
+    // DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+    // cout << "[" << NAME << "] " << __func__ << " set: " << set << " way: " << way;
+    // cout << " lru: " << block[set][way].lru << " tag: " << hex << block[set][way].tag << " full_addr: " << block[set][way].full_addr;
+    // cout << " data: " << block[set][way].data << dec << endl; });
+}
+
+int CACHE::check_hit(PACKET *packet)
+{
+
+    uint32_t set = get_set(packet->address);
+    int match_way = -1;
+
+    //pf_issued=pf_issued+1024;
+    if (FORCE_ALL_HITS) { //(cache_type == IS_L1D || cache_type == IS_L2C || cache_type == IS_LLC)) {
+        // Force a hit by using way 0
+        block[set][0].valid = 1;
+        block[set][0].tag = packet->address;
+        // Optionally, set other necessary fields to simulate a valid cache line
+        return 0; // Indicate a hit in way 0
+    }
+#ifdef TRUE_SANITY_CHECK
+    if (NUM_SET < set) {
+        cerr << "[" << NAME << "_ERROR] " << __func__ << " invalid set idx: " << set << " NUM_SET: " << NUM_SET;
+        cerr << " addr: " << hex << packet->address << " full_addr: " << packet->full_addr << dec;
+        cerr << " event: " << packet->event_cycle << endl;
+        assert(0);
+    }
+#endif
+
+    // hit
+    for (uint32_t way=0; way<NUM_WAY; way++) {
+        if (block[set][way].valid && (block[set][way].tag == packet->address)) {
+            match_way = way;
+            DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+            cout << "[" << NAME << "] " << __func__ << " instr_id: " << packet->instr_id << " type: " << +packet->type << hex << " addr: " << packet->address;
+            cout << " full_addr: " << packet->full_addr << " tag: " << block[set][way].tag << " data: " << block[set][way].data << dec;
+            cout << " set: " << set << " way: " << way << " lru: " << block[set][way].lru;
+            cout << " event: " << packet->event_cycle << " cy: " << current_core_cycle[cpu] << endl; });
+            break;
+        }
+    }
+
+    return match_way;
+}
+
+int CACHE::invalidate_entry(uint64_t inval_addr) {
+    uint32_t set = get_set(inval_addr);
+    int match_way = -1;
+#ifdef TRUE_SANITY_CHECK
+    if (NUM_SET < set) {
+        cerr << "[" << NAME << "_ERROR] " << __func__ << " invalid set idx: " << set << " NUM_SET: " << NUM_SET;
+        cerr << " inval_addr: " << hex << inval_addr << dec << endl;
+        assert(0);
+    }
+#endif
+    // invalidate
+    for (uint32_t way=0; way<NUM_WAY; way++) {
+        if (block[set][way].valid && (block[set][way].tag == inval_addr)) {
+            block[set][way].valid = 0;
+            match_way = way;
+            DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+            cout << "[" << NAME << "] " << __func__ << " inval_addr: " << hex << inval_addr;
+            cout << " tag: " << block[set][way].tag << " data: " << block[set][way].data << dec;
+            cout << " set: " << set << " way: " << way << " lru: " << block[set][way].lru << " cy: " << current_core_cycle[cpu] << endl; });
+            break;
+        }
+    }
+    return match_way;
+}
+
+int CACHE::add_rq(PACKET *packet) {
+
+    // check for the latest wirtebacks in the write queue
+    int wq_index = WQ.check_queue(packet);
+   // check if WQ packet has ByPass and new packet not
+
+
+#ifdef BYPASS_DEBUG
+    if (packet->l1_bypassed == 1 && wq_index != -1) {
+        cout << " > add_rq(): ByP wq hit idx: " << wq_index << " instrID: " << packet->instr_id << " addr: " << packet->address << endl;
+    }
+#endif
+
+    if (wq_index != -1) {
+        if (WQ.entry[wq_index].l1_bypassed == 1 && packet->l1_bypassed == 0)
+            assert(0);
+        // check fill level
+        if (packet->fill_level < fill_level) {
+            packet->data = WQ.entry[wq_index].data;
+            if (packet->instruction)
+                upper_level_icache[packet->cpu]->return_data(packet);
+            else // data
+                upper_level_dcache[packet->cpu]->return_data(packet);
+        }
+#ifdef TRUE_SANITY_CHECK
+        if (cache_type == IS_ITLB)
+            assert(0);
+        else if (cache_type == IS_DTLB)
+            assert(0);
+        else if (cache_type == IS_L1I)
+            assert(0);
+#endif
+        // update processed packets
+        if ((cache_type == IS_L1D) && (packet->type != PREFETCH)) {
+            if (PROCESSED.occupancy < PROCESSED.SIZE)
+                PROCESSED.add_queue(packet);
+            DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+            cout << "[" << NAME << "_RQWQ_PROCESSED] " << __func__ << " instr_id: " << packet->instr_id << " found recent writebacks";
+            cout << hex << " read: " << packet->address << " writeback: " << WQ.entry[wq_index].address << dec;
+            cout << " idx: " << MAX_READ;
+            cout << " WQ ByP: " << (int) WQ.entry[wq_index].l1_bypassed << " type: " << (int) WQ.entry[wq_index].type << " Pack ByP: " << (int) packet->l1_bypassed << " type: " << packet->type  << endl; });
+        }
+#ifdef BYPASS_SANITY_CHECK
+        // if (packet->type != LOAD)
+        //     assert(0&&" DID NOT EXPECT ADD RQ TO TAKE NON LOAD");
+#endif
+#ifdef BYPASS_L1_LOGIC
+        if ((cache_type == IS_L2C) && (packet->type == LOAD) && packet->l1_bypassed == 1 && !packet->instruction) {
+            if (PROCESSED.occupancy < PROCESSED.SIZE) {
+#ifdef BYPASS_DEBUG
+cout << " > add_rq(): L2C PROCESSED_ADD" << " instrID: " << packet->instr_id << " addr: " << packet->address << endl;
+#endif
+                PROCESSED.add_queue(packet);
+            }
+            DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+            cout << "[" << NAME << "_RQWQ_ByP_PROCESSED] " << __func__ << " instr_id: " << packet->instr_id << " found recent writebacks";
+            cout << hex << " read: " << packet->address << " writeback: " << WQ.entry[wq_index].address << dec;
+            cout << " idx: " << MAX_READ;
+            cout << " WQ ByP: " << (int) WQ.entry[wq_index].l1_bypassed << " type: " << (int) WQ.entry[wq_index].type << " Pack ByP: " << (int) packet->l1_bypassed << " type: " << packet->type  << endl; });
+        }
+#endif
+#ifdef BYPASS_L2_LOGIC
+        if ((cache_type == IS_LLC) && (packet->type == LOAD) && packet->l2_bypassed == 1 && !packet->instruction) {
+            // if (PROCESSED.occupancy < PROCESSED.SIZE) {
+                upper_level_dcache[packet->cpu]->upper_level_dcache[packet->cpu]->return_data(packet);
+                // PROCESSED.add_queue(packet);
+            // }
+            DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+            cout << "[" << NAME << "_RQWQ_L2ByP_PROCESSED] " << __func__ << " instr_id: " << packet->instr_id << " found recent writebacks";
+            cout << hex << " read: " << packet->address << " writeback: " << WQ.entry[wq_index].address << dec;
+            cout << " Pack L2ByP: " << (int) packet->l2_bypassed << " type: " << packet->type  << endl; });
+        }
+#endif
+        HIT[packet->type]++;
+        ACCESS[packet->type]++;
+
+        WQ.FORWARD++;
+        RQ.ACCESS++;
+
+        return -1;
+    }
+
+
+    // check for duplicates in the read queue
+    int index = RQ.check_queue(packet);
+#ifdef DEBUG_PRINT
+    if (warmup_complete[cpu]) {
+        if (RQ.entry[index].l1_bypassed == 1 && packet->l1_bypassed == 0) {
+            cout << "[" << NAME << "] " << __func__ << " RQ instrID: " << RQ.entry[index].instr_id << " addr: " << RQ.entry[index].address << " ByP: " << (int)RQ.entry[index].l1_bypassed << " fill: "  << (int)RQ.entry[index].fill_level;
+            cout << " newIN pak: instrID: " << packet->instr_id << " addr: " << packet->address << " ByP: " << (int)packet->l1_bypassed << " fill: "  << (int)packet->fill_level;
+            // RQ.entry[index].l1_bypassed = 0;
+            cout << endl;
+        }
+    }
+#endif
+    if (index != -1) {
+        if (packet->instruction) {
+            uint16_t rob_index = packet->rob_index;
+            RQ.entry[index].rob_index_depend_on_me.insert (rob_index);
+            RQ.entry[index].instr_merged = 1;
+            // DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[packet->cpu]) {
+            // cout << "[INSTR_MERGED] " << __func__ << " cpu: " << (int) packet->cpu << " instr_id: " << RQ.entry[index].instr_id;
+            // cout << " merged idx: " << rob_index << " instr_id: " << packet->instr_id << endl; });
+        } else {
+            // mark merged consumer
+            if (packet->type == RFO) {
+                uint16_t sq_index = packet->sq_index;
+                RQ.entry[index].sq_index_depend_on_me.insert (sq_index);
+                RQ.entry[index].sq_index_depend_on_me.join(packet->sq_index_depend_on_me, SQ_SIZE);  // ← ADD
+                RQ.entry[index].store_merged = 1;
+#ifdef BYPASS_L1_LOGIC
+                if (cache_type == IS_L2C) {
+                    if (RQ.entry[index].l1_bypassed != packet->l1_bypassed) {
+                        RQ.entry[index].l1_bypassed = 0;
+                        // packet->l1_bypassed already 0 for RFO
+                        if (packet->fill_level < RQ.entry[index].fill_level)
+                            RQ.entry[index].fill_level = packet->fill_level;
+                    }
+                }
+#endif
+#ifdef BYPASS_L2_LOGIC
+                if (cache_type == IS_LLC) {
+                    if (RQ.entry[index].l2_bypassed != packet->l2_bypassed) {
+                        RQ.entry[index].l2_bypassed = 0;
+                        if (packet->fill_level < RQ.entry[index].fill_level)
+                            RQ.entry[index].fill_level = packet->fill_level;
+                    }
+                }
+#endif
+#ifdef BYPASS_LLC_LOGIC
+                if (cache_type == IS_LLC) {
+                    if (RQ.entry[index].llc_bypassed != packet->llc_bypassed) {
+                        RQ.entry[index].llc_bypassed = 0;
+                        if (packet->fill_level < RQ.entry[index].fill_level)
+                            RQ.entry[index].fill_level = packet->fill_level;
+                    }
+                }
+#endif
+                DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                cout << "[RFO_MERGED] " << __func__ << " cpu: " << (int) packet->cpu;
+                dump_req(packet);
+                dump_req(RQ.entry[index]);
+                // cout << hex << " Addr: " << packet->address << " FAddr: " << packet->full_addr << dec << " instr_id: " << packet->instr_id << " type:" << (int)packet->type << " rob: " << (int)packet->rob_index << " LQ: " << (int)packet->lq_index << " SQ: " << (int)packet->sq_index << " ByP: " << (int)packet->l1_bypassed ;
+                // cout << hex << " Addr: " << RQ.entry[index].address << " FAddr: " << RQ.entry[index].full_addr << dec << " instr_id: " << RQ.entry[index].instr_id << " type:" << (int)RQ.entry[index].type << " rob: " << (int)RQ.entry[index].rob_index << " LQ: " << (int)RQ.entry[index].lq_index << " SQ: " << (int)RQ.entry[index].sq_index << " ByP: " << (int)RQ.entry[index].l1_bypassed ;
+                cout <<  endl;});
+
+            } 
+            else {
+                uint16_t lq_index = packet->lq_index;
+                // RQ.entry[index].lq_index_depend_on_me.insert (lq_index);
+                RQ.entry[index].lq_index_depend_on_me.insert(lq_index);
+                RQ.entry[index].lq_index_depend_on_me.join(packet->lq_index_depend_on_me, LQ_SIZE);  // ← ADD
+                RQ.entry[index].load_merged = 1;
+#ifdef BYPASS_L2_LOGIC
+                if (cache_type == IS_LLC) {
+                    if (RQ.entry[index].l2_bypassed != packet->l2_bypassed) {
+                        RQ.entry[index].l2_bypassed = 0;
+                        packet->l2_bypassed = 0;
+                        if (packet->fill_level < RQ.entry[index].fill_level)
+                            RQ.entry[index].fill_level = packet->fill_level;
+                    }
+                }
+#endif
+#ifdef BYPASS_LLC_LOGIC
+                if (cache_type == IS_LLC) {
+                    if (RQ.entry[index].llc_bypassed != packet->llc_bypassed) {
+                        RQ.entry[index].llc_bypassed = 0;
+                        packet->llc_bypassed = 0;
+                        if (packet->fill_level < RQ.entry[index].fill_level)
+                            RQ.entry[index].fill_level = packet->fill_level;
+                    }
+                }
+#endif
+#ifdef BYPASS_L1_LOGIC
+                if (cache_type == IS_L2C) {
+                    if (RQ.entry[index].l1_bypassed != packet->l1_bypassed) {
+                        RQ.entry[index].l1_bypassed = 0;
+                        packet->l1_bypassed = 0;
+                        if (packet->fill_level < RQ.entry[index].fill_level)
+                            RQ.entry[index].fill_level = packet->fill_level;
+                    }
+                    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+                    cout << "[ByP_DATA_MERGED] " << __func__ << " cpu: " << (int) packet->cpu;
+                    dump_req(packet);
+                    dump_req(RQ.entry[index]);
+                    // cout << hex << " Addr: " << packet->address << " FAddr: " << packet->full_addr << dec << " instr_id: " << packet->instr_id << " type:" << (int)packet->type << " rob: " << (int)packet->rob_index << " LQ: " << (int)packet->lq_index << " SQ: " << (int)packet->sq_index << " ByP: " << (int)packet->l1_bypassed ;
+                    // cout << hex << " Addr: " << RQ.entry[index].address << " FAddr: " << RQ.entry[index].full_addr << dec << " instr_id: " << RQ.entry[index].instr_id << " type:" << (int)RQ.entry[index].type << " rob: " << (int)RQ.entry[index].rob_index << " LQ: " << (int)RQ.entry[index].lq_index << " SQ: " << (int)RQ.entry[index].sq_index << " ByP: " << (int)RQ.entry[index].l1_bypassed ;
+                    cout <<  endl;});
+                } else {
+#endif
+                    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[packet->cpu]) {
+                        cout << "[NOT L2] " << __func__ << " cpu: " << (int) packet->cpu;
+                        cout << " new Packet";
+                        dump_req(packet);
+                        cout << " RQ";
+                        dump_req(RQ.entry[index]);
+                        // cout << hex << " Addr: " << packet->address << " FAddr: " << packet->full_addr << dec << " instr_id: " << packet->instr_id << " type:" << (int)packet->type << " rob: " << (int)packet->rob_index << " LQ: " << (int)packet->lq_index << " SQ: " << (int)packet->sq_index << " ByP: " << (int)packet->l1_bypassed ;
+                        // cout << hex << " Addr: " << RQ.entry[index].address << " FAddr: " << RQ.entry[index].full_addr << dec << " instr_id: " << RQ.entry[index].instr_id << " type:" << (int)RQ.entry[index].type << " rob: " << (int)RQ.entry[index].rob_index << " LQ: " << (int)RQ.entry[index].lq_index << " SQ: " << (int)RQ.entry[index].sq_index << " ByP: " << (int)RQ.entry[index].l1_bypassed ;
+                        cout <<  endl;});
+                }
+            }
+        }
+        RQ.MERGED++;
+        RQ.ACCESS++;
+        return index; // merged index
+    }
+
+    // check occupancy
+    if (RQ.occupancy == RQ_SIZE) {
+        RQ.FULL++;
+        return -2; // cannot handle this request
+    }
+    // if there is no duplicate, add it to RQ
+    index = RQ.tail;
+
+#ifdef TRUE_SANITY_CHECK
+    if (RQ.entry[index].address != 0) {
+        cerr << "[" << NAME << "_ERROR] " << __func__ << " is not empty idx: " << index;
+        cerr << " addr: " << hex << RQ.entry[index].address;
+        cerr << " full_addr: " << RQ.entry[index].full_addr << dec << endl;
+        assert(0);
+    }
+#endif
+
+    RQ.entry[index]= std::move(*packet);
+
+    // ADD LATENCY
+    if (RQ.entry[index].event_cycle < current_core_cycle[packet->cpu])
+        RQ.entry[index].event_cycle = current_core_cycle[packet->cpu] + LATENCY;
+    else
+        RQ.entry[index].event_cycle += LATENCY;
+
+    RQ.occupancy++;
+    RQ.tail++;
+    if (RQ.tail >= RQ.SIZE)
+        RQ.tail = 0;
+    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[RQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+    cout << "[" << NAME << "_RQ] " <<  __func__;
+    cout << " packet.add=>RQ";
+    dump_req(packet);
+    cout << " instr?: " << (int)packet->instruction << " rq_index " << index;
+    cout << endl; });
+    //
+#ifdef TRUE_SANITY_CHECK
+    if (packet->address == 0)
+        assert(0);
+#endif
+    RQ.TO_CACHE++;
+    RQ.ACCESS++;
+
+    return -1;
+}
+
+int CACHE::add_wq(PACKET *packet) {
+    // check for duplicates in the write queue
+    int index = WQ.check_queue(packet);
+    if (index != -1) {
+        WQ.MERGED++;
+        WQ.ACCESS++;
+        return index; // merged index
+    }
+#ifdef TRUE_SANITY_CHECK
+    // sanity check
+    if (WQ.occupancy >= WQ.SIZE)
+        assert(0);
+#endif
+
+    // if there is no duplicate, add it to the write queue
+    index = WQ.tail;
+#ifdef TRUE_SANITY_CHECK
+    if (WQ.entry[index].address != 0 || WQ.entry[index].l1_bypassed == 1) {
+        cerr << "[" << NAME << "_ERROR] " << __func__ << " is not empty idx: " << index;
+        cerr << " addr: " << hex << WQ.entry[index].address;
+        cerr << " full_addr: " << WQ.entry[index].full_addr << dec << endl;
+        assert(0);
+    }
+#endif
+    WQ.entry[index]= std::move(*packet);
+    // WQ.entry[index].quickReset();
+    // ADD LATENCY
+    if (WQ.entry[index].event_cycle < current_core_cycle[packet->cpu])
+        WQ.entry[index].event_cycle = current_core_cycle[packet->cpu] + LATENCY;
+    else
+        WQ.entry[index].event_cycle += LATENCY;
+
+    WQ.occupancy++;
+    WQ.tail++;
+    if (WQ.tail >= WQ.SIZE)
+        WQ.tail = 0;
+    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[WQ.entry[index].cpu]) {
+    cout << "[" << NAME << "_WQ] " <<  __func__ << " instr_id: " << WQ.entry[index].instr_id << " addr: " << hex << WQ.entry[index].address;
+    cout << " full_addr: " << WQ.entry[index].full_addr << dec;
+    cout << " head: " << WQ.head << " tail: " << WQ.tail << " occup: " << WQ.occupancy;
+    cout << " data: " << hex << WQ.entry[index].data << dec;
+    cout << " event: " << WQ.entry[index].event_cycle << " curr: " << current_core_cycle[WQ.entry[index].cpu] << endl; });
+    WQ.TO_CACHE++;
+    WQ.ACCESS++;
+    return -1;
+}
+
+int CACHE::prefetch_line(uint64_t ip, uint64_t base_addr, uint64_t pf_addr, int pf_fill_level, uint32_t prefetch_metadata) {
+    pf_requested++;
+    if (PQ.occupancy < PQ.SIZE) {
+        if ((base_addr>>LOG2_PAGE_SIZE) == (pf_addr>>LOG2_PAGE_SIZE)) {
+            PACKET pf_packet;
+            pf_packet.fill_level = pf_fill_level;
+            pf_packet.pf_origin_level = fill_level;
+            pf_packet.pf_metadata = prefetch_metadata;
+            pf_packet.cpu = cpu;
+            //pf_packet.data_index = LQ.entry[lq_index].data_index;
+            //pf_packet.lq_index = lq_index;
+            pf_packet.address = pf_addr >> LOG2_BLOCK_SIZE;
+            pf_packet.full_addr = pf_addr;
+            //pf_packet.instr_id = LQ.entry[lq_index].instr_id;
+            //pf_packet.rob_index = LQ.entry[lq_index].rob_index;
+            pf_packet.ip = ip;
+            pf_packet.type = PREFETCH;
+            pf_packet.event_cycle = current_core_cycle[cpu];
+
+            // give a dummy 0 as the IP of a prefetch
+            add_pq(&pf_packet);
+            pf_issued++;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int CACHE::add_pq(PACKET *packet) {
+    // check for the latest wirtebacks in the write queue
+    int wq_index = WQ.check_queue(packet);
+    if (wq_index != -1) {
+        // check fill level
+        if (packet->fill_level < fill_level) {
+            packet->data = WQ.entry[wq_index].data;
+            if (packet->instruction)
+                upper_level_icache[packet->cpu]->return_data(packet);
+            else // data
+                upper_level_dcache[packet->cpu]->return_data(packet);
+        }
+        HIT[packet->type]++;
+        ACCESS[packet->type]++;
+
+        WQ.FORWARD++;
+        PQ.ACCESS++;
+
+        return -1;
+    }
+
+    // check for duplicates in the PQ
+    int index = PQ.check_queue(packet);
+    if (index != -1) {
+        if (packet->fill_level < PQ.entry[index].fill_level)
+            PQ.entry[index].fill_level = packet->fill_level;
+
+        PQ.MERGED++;
+        PQ.ACCESS++;
+
+        return index; // merged index
+    }
+
+    // check occupancy
+    if (PQ.occupancy == PQ_SIZE) {
+        PQ.FULL++;
+        DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+        cout << "[" << NAME << "] cannot process add_pq since it is full" << endl; });
+        return -2; // cannot handle this request
+    }
+
+    // if there is no duplicate, add it to PQ
+    index = PQ.tail;
+
+#ifdef TRUE_SANITY_CHECK
+    if (PQ.entry[index].address != 0) {
+        cerr << "[" << NAME << "_ERROR] " << __func__ << " is not empty idx: " << index;
+        cerr << " addr: " << hex << PQ.entry[index].address;
+        cerr << " full_addr: " << PQ.entry[index].full_addr << dec << endl;
+        assert(0);
+    }
+#endif
+
+    PQ.entry[index]= std::move(*packet);
+
+    // ADD LATENCY
+    if (PQ.entry[index].event_cycle < current_core_cycle[packet->cpu])
+        PQ.entry[index].event_cycle = current_core_cycle[packet->cpu] + LATENCY;
+    else
+        PQ.entry[index].event_cycle += LATENCY;
+
+    PQ.occupancy++;
+    PQ.tail++;
+    if (PQ.tail >= PQ.SIZE)
+        PQ.tail = 0;
+
+    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[PQ.entry[index].cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+    cout << "[" << NAME << "_PQ] " <<  __func__;
+    //     << " instr_id: " << PQ.entry[index].instr_id << " addr: " << hex << PQ.entry[index].address;
+    // cout << " full_addr: " << PQ.entry[index].full_addr << dec;
+    // cout << " type: " << +PQ.entry[index].type << " head: " << PQ.head << " tail: " << PQ.tail << " occup: " << PQ.occupancy;
+    dump_req(packet);
+    cout << " event: " << PQ.entry[index].event_cycle << " curr: " << current_core_cycle[PQ.entry[index].cpu] << endl; });
+#ifdef TRUE_SANITY_CHECK
+    if (packet->address == 0 && !FORCE_ALL_HITS)
+        assert(0);
+#endif
+    PQ.TO_CACHE++;
+    PQ.ACCESS++;
+
+    return -1;
+}
+
+void CACHE::return_data(PACKET *packet) {
+    // check MSHR information
+#ifdef BYPASS_DEBUG
+    if (packet->instr_id == 2001730 || (uint64_t) packet->address == 1514623703326)
+        cout << NAME << " PROBLEM PACKET RETURNED!!!!";
+#endif
+    int mshr_index = check_mshr(packet);
+#ifdef BYPASS_DEBUG
+    if (packet->l1_bypassed == 1)
+        cerr << "CATCH!!!! " << "MSHR: " << mshr_index << " instrID: " << packet->instr_id <<  endl;
+#endif
+
+#ifdef TRUE_SANITY_CHECK
+    // sanity check
+    if (mshr_index == -1) {
+        cerr << "[" << NAME << "_MSHR] " << __func__ << " instr_id: " << packet->instr_id << " cannot find a matching entry!";
+        cerr << " full_addr: " << hex << packet->full_addr;
+        cerr << " addr: " << packet->address << dec;
+        cerr << " event: " << packet->event_cycle << " curr: " << current_core_cycle[packet->cpu] << endl;
+        assert(0);
+    }
+#endif
+    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[packet->cpu]) {
+    cout << "[" << NAME << "MSHR_ret_before] " <<  __func__;
+    dump_req(packet);
+    cout << " MSHR: ";
+    dump_req(MSHR.entry[mshr_index]);
+    cout << endl; });
+    // if (packet->instr_id == MSHR.entry[mshr_index].instr_id) {
+    //     MSHR.entry[mshr_index].lq_index_depend_on_me.join(packet->lq_index_depend_on_me);
+    // }
+
+    // MSHR holds the most updated information about this request
+    // no need to do memcpy
+    MSHR.num_returned++;
+    MSHR.entry[mshr_index].returned = COMPLETED;
+    MSHR.entry[mshr_index].data = packet->data;
+    MSHR.entry[mshr_index].pf_metadata = packet->pf_metadata;
+
+    // ADD LATENCY
+    if (MSHR.entry[mshr_index].event_cycle < current_core_cycle[packet->cpu])
+        MSHR.entry[mshr_index].event_cycle = current_core_cycle[packet->cpu] + LATENCY;
+    else
+        MSHR.entry[mshr_index].event_cycle += LATENCY;
+#ifdef BYPASS_L1_LOGIC
+    // CASE: ONLY PREFETCH promotion — LOAD MSHR is handled at L2C mismatch time
+    if (cache_type == IS_L1D && packet->type == LOAD && !packet->instruction
+        && MSHR.entry[mshr_index].type == PREFETCH) {
+        MSHR.entry[mshr_index].type      = packet->type;
+        MSHR.entry[mshr_index].instr_id   = packet->instr_id;
+        MSHR.entry[mshr_index].lq_index   = packet->lq_index;
+        MSHR.entry[mshr_index].rob_index  = packet->rob_index;
+        MSHR.entry[mshr_index].full_addr  = packet->full_addr;
+        MSHR.entry[mshr_index].ip         = packet->ip;
+        if (packet->load_merged) {
+            MSHR.entry[mshr_index].load_merged = 1;
+            MSHR.entry[mshr_index].lq_index_depend_on_me.join(
+                packet->lq_index_depend_on_me, LQ_SIZE);
+        }
+#ifdef DEBUG_PRINT
+        cout << "MSHR.entry[mshr_index].lq_index" << MSHR.entry[mshr_index].lq_index << endl;
+#endif
+        MSHR.entry[mshr_index].lq_index_depend_on_me.remove(
+            MSHR.entry[mshr_index].lq_index);
+        }
+    // CASE: THE RETURNING PACKET MAY HAVE DEPENDENCIES ACCUM FROM BYPASS AND L1D NOT HAVE THOSE, SO ON RETURN WE NATURALLY MERGE DEPENDENCES
+    if (cache_type == IS_L1D && packet->type == LOAD && !packet->instruction && MSHR.entry[mshr_index].type == LOAD) {
+        MSHR.entry[mshr_index].lq_index_depend_on_me.join(packet->lq_index_depend_on_me, LQ_SIZE);
+        if (MSHR.entry[mshr_index].instr_id != packet->instr_id) {
+            MSHR.entry[mshr_index].lq_index_depend_on_me.insert(packet->lq_index);
+        }
+    }
+    // CASE: LOAD => RFO merge (L2C merged LOAD+RFO, returned via LOAD path)
+    if (cache_type == IS_L1D && packet->type == LOAD && !packet->instruction && MSHR.entry[mshr_index].type == RFO) {
+        MSHR.entry[mshr_index].load_merged = 1;
+        MSHR.entry[mshr_index].lq_index_depend_on_me.insert(packet->lq_index);
+        if (packet->load_merged) {
+            MSHR.entry[mshr_index].lq_index_depend_on_me.join(
+                packet->lq_index_depend_on_me, LQ_SIZE);
+        }
+        if (packet->store_merged) {
+            MSHR.entry[mshr_index].store_merged = 1;
+            MSHR.entry[mshr_index].sq_index_depend_on_me.join(
+                packet->sq_index_depend_on_me, SQ_SIZE);
+        }
+    }
+    // CASE: RFO packet => RFO MSHR (RQ entry retained type=RFO, but accumulated LOAD dependencies from merge)
+    if (cache_type == IS_L1D && packet->type == RFO && MSHR.entry[mshr_index].type == RFO) {
+        if (packet->load_merged) {
+            MSHR.entry[mshr_index].load_merged = 1;
+            MSHR.entry[mshr_index].lq_index_depend_on_me.join(
+                packet->lq_index_depend_on_me, LQ_SIZE);
+        }
+        if (packet->store_merged) {
+            MSHR.entry[mshr_index].store_merged = 1;
+            MSHR.entry[mshr_index].sq_index_depend_on_me.join(
+                packet->sq_index_depend_on_me, SQ_SIZE);
+        }
+        }
+
+
+#endif
+//     // VB: ===== NEW: propagate bypass-accumulated deps from lower level =====
+// #ifdef BYPASS_L1_LOGIC
+//     if (cache_type == IS_L1D) {
+//         if (packet->load_merged) {
+//             MSHR.entry[mshr_index].load_merged = 1;
+//             MSHR.entry[mshr_index].lq_index_depend_on_me.join(
+//                 packet->lq_index_depend_on_me, LQ_SIZE);
+//             // MSHR.entry[mshr_index].lq_index_depend_on_me.setbit(packet->lq_index);
+//
+//         }
+//         if (packet->store_merged) {
+//             MSHR.entry[mshr_index].store_merged = 1;
+//             MSHR.entry[mshr_index].sq_index_depend_on_me.join(
+//                 packet->sq_index_depend_on_me, SQ_SIZE);
+//         }
+//     }
+// #endif
+//     // ===== END NEW =====
+
+    update_fill_cycle();
+
+    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[packet->cpu]) {
+    cout << "[" << NAME << "_MSHR_ret_after] " <<  __func__;
+    cout << " MSHR";
+    dump_req(MSHR.entry[mshr_index]);
+    //     << " recieved instr_id: " << MSHR.entry[mshr_index].instr_id;
+    // cout << " addr: " << hex << MSHR.entry[mshr_index].address << " full_addr: " << MSHR.entry[mshr_index].full_addr;
+    // cout << " data: " << MSHR.entry[mshr_index].data << dec << " num_returned: " << MSHR.num_returned;
+    // cout << " idx: " << mshr_index << " occup: " << MSHR.occupancy;
+    // cout << " event: " << MSHR.entry[mshr_index].event_cycle << " curr: " << current_core_cycle[packet->cpu] << " next: " << MSHR.next_fill_cycle;
+    // cout << " MSHR ByP: " << (int) MSHR.entry[mshr_index].l1_bypassed << " type: " << (int) MSHR.entry[mshr_index].type << " Pack ByP: " << (int) packet->l1_bypassed << " type: " << static_cast<int>(packet->type)
+    cout << endl; });
+}
+
+void CACHE::update_fill_cycle() {
+    // update next_fill_cycle
+    uint64_t min_cycle = UINT64_MAX;
+    uint16_t min_index = MSHR.SIZE;
+    for (uint16_t i=0; i<MSHR.SIZE; i++) {
+        if ((MSHR.entry[i].returned == COMPLETED) && (MSHR.entry[i].event_cycle < min_cycle)) {
+            min_cycle = MSHR.entry[i].event_cycle;
+            min_index = i;
+        }
+        // DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[MSHR.entry[i].cpu]) {
+        // cout << "[" << NAME << "_MSHR] " <<  __func__ << " checking instr_id: " << MSHR.entry[i].instr_id;
+        // cout << " addr: " << hex << MSHR.entry[i].address << " full_addr: " << MSHR.entry[i].full_addr;
+        // cout << " data: " << MSHR.entry[i].data << dec << " returned: " << +MSHR.entry[i].returned << " fill_level: " << (int) MSHR.entry[i].fill_level;
+        // cout << " idx: " << i << " occup: " << MSHR.occupancy;
+        // cout << " event: " << MSHR.entry[i].event_cycle << " curr: " << current_core_cycle[MSHR.entry[i].cpu] << " next: " << MSHR.next_fill_cycle;
+        // cout << " MSHR ByP: " << (int) MSHR.entry[i].l1_bypassed << " type: " << (int) MSHR.entry[i].type << endl; });
+    }
+    MSHR.next_fill_cycle = min_cycle;
+    MSHR.next_fill_index = min_index;
+    if (min_index < MSHR.SIZE) {
+        // DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[MSHR.entry[min_index].cpu]) {
+        // cout << "[" << NAME << "_MSHR] " <<  __func__ << " instr_id: " << MSHR.entry[min_index].instr_id;
+        // cout << " addr: " << hex << MSHR.entry[min_index].address << " full_addr: " << MSHR.entry[min_index].full_addr;
+        // cout << " data: " << MSHR.entry[min_index].data << dec << " num_returned: " << MSHR.num_returned;
+        // cout << " event: " << MSHR.entry[min_index].event_cycle << " curr: " << current_core_cycle[MSHR.entry[min_index].cpu] << " next: " << MSHR.next_fill_cycle;
+        // cout << " MSHR ByP: " << (int) MSHR.entry[min_index].l1_bypassed << " type: " << (int) MSHR.entry[min_index].type  << endl; });
+    }
+}
+
+int CACHE::probe_mshr(PACKET *packet) {
+    for (uint16_t index = 0; index < MSHR_SIZE; index++) {
+        if (MSHR.entry[index].address == packet->address)
+            return index;
+    }
+    return -1;
+}
+
+int CACHE::check_mshr(PACKET *packet) {
+    // search mshr
+    for (uint16_t index=0; index<MSHR_SIZE; index++) {
+#ifdef BYPASS_L1_LOGIC_EQUIVALENCY_ON_ADDR_AND_BYPASS
+        if (MSHR.entry[index].address == packet->address && MSHR.entry[index].l1_bypassed == packet->l1_bypassed) {
+
+#else
+        if (MSHR.entry[index].address == packet->address) { // FOR SPEED OF SIMS
+#endif
+#ifdef BYPASS_L1_LOGIC
+            if (MSHR.entry[index].l1_bypassed == 1 && packet->l1_bypassed == 0 && packet->type == LOAD) {
+                MSHR.entry[index].l1_bypassed = 0;
+                MSHR.entry[index].fill_level = packet->fill_level;
+            }
+#endif
+#ifdef BYPASS_L2_LOGIC
+            if (MSHR.entry[index].l2_bypassed == 1 && packet->l2_bypassed == 0 && packet->type == LOAD) {
+                MSHR.entry[index].l2_bypassed = 0;
+                MSHR.entry[index].fill_level = packet->fill_level;
+            }
+#endif
+#ifdef BYPASS_LLC_LOGIC
+            if (MSHR.entry[index].llc_bypassed == 1 && packet->llc_bypassed == 0 && packet->type == LOAD) {
+                MSHR.entry[index].llc_bypassed = 0;
+                MSHR.entry[index].fill_level = packet->fill_level;
+            }
+#endif
+        DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+            cout << "[" << NAME << "_MSHR] " << __func__ << " EQUIVALENT new entry";
+            dump_req(packet);
+            cout << " MSHR";
+            dump_req(MSHR.entry[index]);
+            //                                                 "new instr_id: " << packet->instr_id << " existing_id: " << MSHR.entry[index].instr_id;
+            // cout << " mFill: " << (int)MSHR.entry[index].fill_level << " mByP: " << (int)(MSHR.entry[index].l1_bypassed) << " type: " << (int) MSHR.entry[index].type;
+            // cout << " paddr: " << hex << packet->address;
+            // cout << " pfull_addr: " << packet->full_addr << dec << " ByP: " << (int) packet->l1_bypassed <<   " type: " << (int) packet->type
+            cout << endl; });
+            return index;
+        }
+    }
+    DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+    cout << "[" << NAME << "_MSHR] " << __func__ << " new addr: " << hex << packet->address;
+    // cout << " full_addr: " << packet->full_addr << dec << endl; });
+    // DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[packet->cpu] && (MSHR.occupancy == MSHR_SIZE) && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+    // cout << "[" << NAME << "_MSHR] " << __func__ << " mshr is full";
+    // cout << " instr_id: " << packet->instr_id << " mshr occup: " << MSHR.occupancy;
+    // cout << " addr: " << hex << packet->address;
+    // cout << " full_addr: " << packet->full_addr << dec;
+    // cout << " cy: " << current_core_cycle[packet->cpu]
+        cout << " PACKET NOT IN MSHR";
+        dump_req(packet);
+        cout << endl; });
+    return -1;
+}
+
+inline void CACHE::add_mshr(PACKET *packet) {
+    uint16_t index = 0;
+    packet->cycle_enqueued = current_core_cycle[packet->cpu];
+    // search mshr
+    for (index=0; index<MSHR_SIZE; index++) {
+        if (MSHR.entry[index].address == 0) {
+            MSHR.entry[index]= std::move(*packet);
+            MSHR.entry[index].returned = INFLIGHT;
+
+            MSHR.occupancy++;
+            DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[packet->cpu] && (NAME == "L1D" || NAME == "L2C" || NAME == "LLC")) {
+            cout << "[" << NAME << "_MSHR] " << __func__;
+            dump_req(packet);
+            cout << " MSHR";
+            dump_req(MSHR.entry[index]);
+            //     " instr_id: " << packet->instr_id;
+            // cout << " addr: " << hex << packet->address << " full_addr: " << packet->full_addr << dec;
+            cout << " idx: " << index << " occup: " << MSHR.occupancy << endl; });
+            break;
+        }
+#ifdef BYPASS_DEBUG
+        if (MSHR.entry[index].event_cycle+10000  < current_core_cycle[packet->cpu]&& MSHR.entry[index].l1_bypassed == 1) {
+            cout << " MSHR IS NOT RESOLVED FOR BYPASS lvl: " << NAME << " addr: " <<  MSHR.entry[index].address << " instrID: " << MSHR.entry[index].instr_id << endl; 
+        }
+#endif
+
+    }
+#ifdef TRUE_SANITY_CHECK
+    if (index == MSHR_SIZE) {
+        cerr << "[" << NAME << "_MSHR] " << __func__ << " cannot find an empty entry!";
+        cerr << " instr_id: " << packet->instr_id << " addr: " << hex << packet->address;
+        cerr << " full_addr: " << packet->full_addr << dec << endl;
+        assert(0);
+    }
+#endif
+}
+
+uint32_t CACHE::get_occupancy(uint8_t queue_type, uint64_t address) {
+    switch (queue_type) {
+        case 0: return MSHR.occupancy;
+        case 1: return RQ.occupancy;
+        case 2: return WQ.occupancy;
+        case 3: return PQ.occupancy;
+        default: return 0;
+    }
+}
+
+uint32_t CACHE::get_size(uint8_t queue_type, uint64_t address)
+{
+    switch (queue_type) {
+        case 0: return MSHR.SIZE;
+        case 1: return RQ.SIZE;
+        case 2: return WQ.SIZE;
+        case 3: return PQ.SIZE;
+        default: return 0; // if guaranteed 0-3 range
+    }
+}
+
+void CACHE::increment_WQ_FULL(uint64_t address)
+{
+    WQ.FULL++;
+}
+
+void CACHE::prefetcher_feedback(uint64_t &pref_gen, uint64_t &pref_fill, uint64_t &pref_used, uint64_t &pref_late)
+{
+    pref_gen = pf_issued;
+    pref_fill = pf_fill;
+    pref_used = pf_useful;
+    pref_late = pf_late;
+}

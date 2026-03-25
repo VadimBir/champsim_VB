@@ -1,0 +1,229 @@
+#include "cache.h"
+#include <cstdint>
+#include <cmath>
+#include <iostream>
+#include <iomanip>
+
+enum KeyType { K_BLOCK_HASH=0, K_BLOCK_DELTA, K_BLOCK2PAGE, K_IP_HASH, K_PAGE_HASH, K_IP_DELTA, K_PAGE_DELTA, K_NUM };
+enum ValType { V_BLOCK=0, V_BLOCK_DELTA, V_BLOCK2PAGE, V_BLOCK_DELTA_2ND, V_NUM };
+
+const char* KEY_NAMES[] = {"BLOCK_HASH", "BLOCK_DELTA", "BLOCK2PAGE", "IP_HASH", "PAGE_HASH", "IP_DELTA", "PAGE_DELTA"};
+const char* VAL_NAMES[] = {"BLOCK", "BLOCK_DELTA", "BLOCK2PAGE", "BLOCK_DELTA_2ND"};
+
+class MappingCorrelation {
+public:
+    static constexpr int NUM_MAPPINGS = K_NUM * V_NUM;
+    static constexpr double EPSILON = 1e-12;
+    static constexpr uint16_t MIN_SAMPLES = 10;
+    static constexpr int FIFO_SIZE = 64;
+
+    struct Stats { 
+        double sx=0, sy=0, sxy=0, sx2=0, sy2=0;
+        uint16_t n=0; 
+    };
+    Stats stats[NUM_MAPPINGS];
+
+    struct FIFOEntry { int64_t key; int64_t value; };
+    struct FIFOHistory { 
+        FIFOEntry entries[FIFO_SIZE]; 
+        int head=0; 
+        int count=0; 
+        uint64_t hits=0; 
+        uint64_t total=0; 
+    };
+    FIFOHistory history[NUM_MAPPINGS];
+
+    struct Carry { 
+        uint64_t block=0, page=0, ip=0; 
+        uint16_t block_hash=0, page_hash=0, ip_hash=0;
+        int64_t d_block=0, d_ip=0, d_page=0, b2p=0, d_block2=0; 
+    };
+    Carry curr, prev, prev2;
+
+    static uint16_t hash16(uint64_t x) { return (uint16_t)((x >> 1) ^ (x >> 4)); }
+
+    int64_t get_key(const Carry& c, KeyType k) const {
+        switch(k) { 
+            case K_BLOCK_HASH: return c.block_hash; 
+            case K_BLOCK_DELTA: return c.d_block; 
+            case K_BLOCK2PAGE: return c.b2p;
+            case K_IP_HASH: return c.ip_hash; 
+            case K_PAGE_HASH: return c.page_hash; 
+            case K_IP_DELTA: return c.d_ip; 
+            case K_PAGE_DELTA: return c.d_page; 
+            default: return 0; 
+        }
+    }
+    
+    int64_t get_val(const Carry& c, ValType v) const {
+        switch(v) { 
+            case V_BLOCK: return c.block;
+            case V_BLOCK_DELTA: return c.d_block; 
+            case V_BLOCK2PAGE: return c.b2p; 
+            case V_BLOCK_DELTA_2ND: return c.d_block2; 
+            default: return 0; 
+        }
+    }
+
+    static int idx(KeyType k, ValType v) { return k * V_NUM + v; }
+
+    void operate(uint64_t ip, uint64_t block) {
+        prev2 = prev; prev = curr;
+        curr.ip = ip; 
+        curr.block = block; 
+        curr.page = block >> 6; 
+        curr.b2p = block - (curr.page << 6);
+        curr.ip_hash = hash16(ip);
+        curr.page_hash = hash16(curr.page);
+        curr.block_hash = hash16(block);
+        
+        curr.d_block = (int64_t)curr.block - (int64_t)prev.block;
+        curr.d_ip = (int64_t)curr.ip - (int64_t)prev.ip;
+        curr.d_page = (int64_t)curr.page - (int64_t)prev.page;
+        curr.d_block2 = (int64_t)curr.block - (int64_t)prev2.block;
+
+        for (int k = 0; k < K_NUM; k++) {
+            for (int v = 0; v < V_NUM; v++) {
+                int i = idx((KeyType)k, (ValType)v);
+                
+                bool is_delta = (v == V_BLOCK_DELTA || v == V_BLOCK_DELTA_2ND);
+                if (is_delta && curr.page != prev.page) continue;
+                
+                int64_t key_val = get_key(curr, (KeyType)k);
+                int64_t actual_val = get_val(curr, (ValType)v);
+                
+                FIFOHistory& h = history[i];
+                
+                // STEP 1: Linear search FIFO for matching key
+                for (int j = 0; j < h.count; j++) {
+                    int fidx = (h.head - 1 - j + FIFO_SIZE) % FIFO_SIZE;
+                    if (h.entries[fidx].key == key_val) {
+                        h.total++;
+                        if (h.entries[fidx].value == actual_val) h.hits++;
+                        break;
+                    }
+                }
+                
+                // STEP 2: Add to FIFO
+                h.entries[h.head].key = key_val;
+                h.entries[h.head].value = actual_val;
+                h.head = (h.head + 1) % FIFO_SIZE;
+                if (h.count < FIFO_SIZE) h.count++;
+                
+                // STEP 3: Correlation
+                double x = (double)key_val;
+                double y = (double)actual_val;
+                
+                stats[i].sx += x; 
+                stats[i].sy += y; 
+                stats[i].sxy += x * y;
+                stats[i].sx2 += x * x; 
+                stats[i].sy2 += y * y;
+                stats[i].n++;
+            }
+        }
+    }
+
+    double get_corr(KeyType k, ValType v) const {
+        const Stats& s = stats[idx(k, v)];
+        if (s.n < 2) return 0.0;
+        
+        double n = s.n;
+        double mx = s.sx / n;
+        double my = s.sy / n;
+        double vx = s.sx2 / n - mx * mx;
+        double vy = s.sy2 / n - my * my;
+        double cov = s.sxy / n - mx * my;
+        
+        if (vx < EPSILON || vy < EPSILON) return 0.0;
+        
+        double r = cov / (std::sqrt(vx) * std::sqrt(vy));
+        if (r < -1.0 || r > 1.0) return 0.0;
+        return r;
+    }
+
+    double get_accuracy(KeyType k, ValType v) const {
+        const FIFOHistory& h = history[idx(k, v)];
+        return (h.total > 0) ? (double)h.hits / h.total : 0.0;
+    }
+
+    uint16_t get_count(KeyType k, ValType v) const { 
+        return stats[idx(k, v)].n; 
+    }
+
+    void print_diagnostics() const {
+        std::cout << "\n=== SLIDING WINDOW VALIDATION ===" << std::endl;
+        for (int k = 0; k < K_NUM; k++) {
+            for (int v = 0; v < V_NUM; v++) {
+                int i = idx((KeyType)k, (ValType)v);
+                const Stats& s = stats[i];
+                const FIFOHistory& h = history[i];
+                
+                if (s.n < MIN_SAMPLES) continue;
+                
+                double r = get_corr((KeyType)k, (ValType)v);
+                double acc = get_accuracy((KeyType)k, (ValType)v);
+                
+                std::cout << std::setw(14) << std::left << KEY_NAMES[k] 
+                          << " → " 
+                          << std::setw(18) << std::left << VAL_NAMES[v] 
+                          << " | r=" << std::setw(7) << std::fixed << std::setprecision(4) << r
+                          << " | acc=" << std::setw(7) << std::setprecision(4) << acc
+                          << " | " << std::setw(8) << h.hits 
+                          << "/" << std::setw(8) << h.total 
+                          << " | n=" << s.n << std::endl;
+            }
+        }
+        std::cout << "================================\n" << std::endl;
+    }
+};
+
+MappingCorrelation corr_tracker;
+
+void CACHE::l2c_prefetcher_initialize() { }
+
+uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, 
+                                        uint8_t type, uint32_t metadata_in)
+{
+    corr_tracker.operate(ip, addr >> LOG2_BLOCK_SIZE);
+    for (int k = 0; k < K_NUM; k++) {
+        for (int v = 0; v < V_NUM; v++) {
+            double r = corr_tracker.get_corr((KeyType)k, (ValType)v);
+            double acc = corr_tracker.get_accuracy((KeyType)k, (ValType)v);
+            std::cout << std::setw(14) << std::left << KEY_NAMES[k] 
+                      << " → " 
+                      << std::setw(18) << std::left << VAL_NAMES[v] 
+                      << ": r=" << std::setw(6) << std::right << std::fixed << std::setprecision(3) << r 
+                      << " acc=" << std::setw(6) << std::setprecision(3) << acc
+                      << "   ";
+        }
+        std::cout << std::endl;
+    }
+    return metadata_in;
+}
+
+uint32_t CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, 
+                                           uint8_t prefetch, uint64_t evicted_addr, 
+                                           uint32_t metadata_in)
+{
+    return metadata_in;
+}
+
+void CACHE::l2c_prefetcher_final_stats()
+{
+    for (int k = 0; k < K_NUM; k++) {
+        for (int v = 0; v < V_NUM; v++) {
+            double r = corr_tracker.get_corr((KeyType)k, (ValType)v);
+            double acc = corr_tracker.get_accuracy((KeyType)k, (ValType)v);
+            std::cout << std::setw(14) << std::left << KEY_NAMES[k] 
+                      << " → " 
+                      << std::setw(18) << std::left << VAL_NAMES[v] 
+                      << ": r=" << std::setw(6) << std::right << std::fixed << std::setprecision(3) << r 
+                      << " acc=" << std::setw(6) << std::setprecision(3) << acc
+                      << "   ";
+        }
+        std::cout << std::endl;
+    }
+    std::cout << std::endl << std::endl;
+    corr_tracker.print_diagnostics();
+}

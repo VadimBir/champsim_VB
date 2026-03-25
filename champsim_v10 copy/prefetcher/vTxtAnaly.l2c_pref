@@ -1,0 +1,463 @@
+#include "cache.h"
+
+#include <thread>
+#include <atomic>
+#include <vector>
+#include <algorithm>
+#include <chrono>
+
+// define the cfg to catch array out of bound error 
+// #define _GLIBCXX_DEBUG 
+// #define _GLIBCXX_ASSERTIONS
+// #define _FORTIFY_SOURCE=2 
+
+
+struct APCEntry {
+    uint64_t addrBlock;
+    uint64_t cycle;
+};
+
+class APCStruct {
+private:
+    APCEntry* entries;
+    int window_size;
+    int head;
+    int tail;
+    int count;
+
+public:
+    APCStruct(int size = 128) : window_size(size), head(0), tail(0), count(0) {
+        entries = new APCEntry[window_size];
+    }
+    
+    ~APCStruct() {
+        delete[] entries;
+    }
+    
+    void add(uint64_t addrBlock, uint64_t cycle) {
+        if (count == window_size) {
+            head = (head + 1) % window_size;
+        } else {
+            count++;
+        }
+        entries[tail].addrBlock = addrBlock;
+        entries[tail].cycle = cycle;
+        tail = (tail + 1) % window_size;
+    }
+    
+    double get() {
+        if (count < 2) return 0.0;
+        
+        // Find min/max cycles in current window
+        uint64_t min_cycle = UINT64_MAX, max_cycle = 0;
+        for (int i = 0; i < count; i++) {
+            int idx = (head + i) % window_size;
+            min_cycle = std::min(min_cycle, entries[idx].cycle);
+            max_cycle = std::max(max_cycle, entries[idx].cycle);
+        }
+        
+        if (max_cycle == min_cycle) return 0.0;
+        double apc = (double)count / (max_cycle - min_cycle + 1);
+        return std::round(apc * 1000.0) / 1000.0;
+    }
+};
+
+// Usage:
+APCStruct apc(256);  // Custom window size
+APCStruct apc7(128);  // Custom window size
+APCStruct apc6(64);  // Custom window size
+APCStruct apc5(32);  // Custom window size
+APCStruct apc4(16);  // Custom window size
+APCStruct apc3(8);  // Custom window size
+APCStruct apc2(4);  // Custom window size
+
+#define RESET "\033[0m"
+
+// RGB color function
+string rgb(int r, int g, int b) {
+    return "\033[38;2;" + to_string(r) + ";" + to_string(g) + ";" + to_string(b) + "m";
+}
+
+// Hash-based color mapping
+class ColorMapper {
+public:
+    std::unordered_map<uint64_t, string> color_cache;
+    string getColor(uint64_t value) {
+    if (color_cache.find(value) != color_cache.end()) {
+        return color_cache[value];
+    }
+    
+    // XOR shift for better bit mixing
+    value ^= value >> 33;
+    value *= 0xff51afd7ed558ccd;
+    value ^= value >> 33;
+    value *= 0xc4ceb9fe1a85ec53;
+    value ^= value >> 33;
+    
+    int r = 100 + ((value >> 16) % 156);
+    int g = 100 + ((value >> 8) % 156);
+    int b = 100 + (value % 156);
+    
+    string color = rgb(r, g, b);
+    color_cache[value] = color;
+    return color;
+}
+};
+
+ColorMapper page_colors, ip_colors;
+
+uint64_t pre_cycle;
+
+uint64_t pre_page = 0;
+int64_t pageDelta = 0;
+int64_t pre_block2pg = 0;
+int64_t pre_ip = 0;
+
+struct PrintEntry {
+    stringstream content;
+    uint64_t entry_id;
+};
+
+vector<PrintEntry> print_buffer;
+uint64_t entry_counter = 0;
+uint64_t post_mshr16_counter = 0;
+bool tracking_mshr16 = false;
+
+void flush_buffer() {
+    for (auto& entry : print_buffer) {
+        cout << setw(5) << left << entry.entry_id << " " << entry.content.str();
+    }
+    print_buffer.clear();
+    tracking_mshr16 = false;
+    post_mshr16_counter = 1;
+}
+#define NUM_POST_ENTRIES 64
+PrintEntry entry;
+int64_t delta_ip = 0;
+int64_t pre_delta_ip = 0;
+int64_t pre_pre_ip = 0;
+int64_t pre_block_addr = 0;
+uint64_t pf_addr = 0;
+uint64_t block_addr = 0;
+uint64_t page_startBlock = 0;
+int64_t relative2page_delta = 0;
+uint64_t current_page = 0;
+
+void CACHE::l2c_prefetcher_initialize() 
+{
+  
+}
+
+// uint64_t skip_till_cnt = 10000000; // v2
+uint64_t skip_till_cnt = 1;
+// V.1 uint64_t skip_till_cycle =  541854828; //<=1c //8-core 569463658;
+// v.2 uint64_t skip_till_cycle =  548698422; //<=1c //8-core 569463658;
+// uint64_t skip_till_cycle =  530853544; //<=1c //8-core 569463658;
+// uint64_t skip_till_cycle =  0; //<=1c //8-core 569463658;
+uint64_t skip_till_cycle =  333824769; //<=1c //8-core 569463658;
+// v.2 uint64_t skip_till_cycle =  548698422; //<=1c //8-core 569463658;
+// V.1 uint64_t end_cycle = 563772019; //<=1c // 669304479;
+// uint64_t end_cycle = 551122617; //<=1c // 669304479;
+// uint64_t end_cycle = UINT64_MAX; //<=1c // 669304479;
+uint64_t end_cycle = 350890153; //<=1c // 669304479;
+uint64_t end_cnt = 200000;
+bool ended = false;
+
+// array 126 size
+uint64_t delta_distribution_count[126] = {0};
+
+// function that would take values from -63 to -1 and from 1 to 63 and allocate to their corresponding index where index 0 is -63 and index 63 is 126
+int get_index(int64_t value) {
+    if (value < 0) {
+        return 63 + value; // -63→0, -62→1, ..., -1→62
+    } else {
+        return 62 + value; // 1→63, 2→64, ..., 63→125
+    }
+}
+
+int64_t get_delta_from_idx(uint64_t idx) {
+    if (idx <= 62) {
+        return idx - 63; // 0→-63, 1→-62, ..., 62→-1
+    } else {
+        return idx - 62; // 63→1, 64→2, ..., 125→63
+    }
+}
+    
+
+uint64_t cnt = 1;
+bool coll_started = false; 
+bool coll_ended = false;
+uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint32_t metadata_in)
+{
+    if (end_cnt < cnt){
+        return metadata_in;
+    }
+    if (skip_till_cycle > current_core_cycle[0]){
+        cnt=0;
+        return metadata_in;
+    }
+    if (end_cycle < current_core_cycle[0]){
+        if (coll_ended == false){
+            coll_ended = true;
+            cout << "ENDED COLLECTION at cycle:" << end_cycle << endl;
+        }
+        return metadata_in;
+    }
+    if (entry.entry_id%2==0){
+        flush_buffer();
+    }
+    pf_addr = ((addr>>LOG2_BLOCK_SIZE)+1) << LOG2_BLOCK_SIZE;
+    block_addr = addr >> LOG2_BLOCK_SIZE;
+    page_startBlock = ((addr >> LOG2_PAGE_SIZE) << LOG2_PAGE_SIZE) >> LOG2_BLOCK_SIZE;
+    int delta_block = block_addr - pre_block_addr;
+
+    if (coll_started == false){
+        coll_started = true;
+        pre_cycle = current_core_cycle[0];
+        cout << "BEGAN COLLECTION At Cycle: "<< current_core_cycle[0] << endl;
+    }
+    
+
+    relative2page_delta = block_addr - page_startBlock;
+    current_page = (addr >> LOG2_PAGE_SIZE);
+    
+    apc.add(block_addr, current_core_cycle[0]);
+    apc7.add(block_addr, current_core_cycle[0]);
+    apc6.add(block_addr, current_core_cycle[0]);
+    apc5.add(block_addr, current_core_cycle[0]);
+    apc4.add(block_addr, current_core_cycle[0]);
+    apc3.add(block_addr, current_core_cycle[0]);
+    apc2.add(block_addr, current_core_cycle[0]);
+
+    bool same_page = ((pre_block_addr << LOG2_BLOCK_SIZE >> LOG2_PAGE_SIZE) == (block_addr << LOG2_BLOCK_SIZE >> LOG2_PAGE_SIZE));
+
+    if (delta_block > 63 || delta_block < -63 || delta_block == 0 || !same_page) { 
+        // cout << "Triggering prefetching for block: " << delta_block << endl; 
+        pre_block_addr = block_addr;
+        return metadata_in;
+    }
+    // global statistics on delta distribution  
+    int arr_d_idx = get_index(delta_block);
+    delta_distribution_count[arr_d_idx]++;
+    // cout << "idx: " << arr_d_idx << " count: " << delta_distribution_count[arr_d_idx] << " getD: " << get_delta_from_idx(arr_d_idx) << endl;
+    // return metadata_in;
+    // return metadata_in;
+
+    entry = PrintEntry();
+    entry.entry_id = current_core_cycle[0];
+
+          
+    // entry.content << "^8 " << setprecision(3) << setw(5) << apc.get() 
+    // entry.content << " ^7 " << setprecision(3) << setw(5) << apc7.get() 
+    //               << " ^6 " << setprecision(3) << setw(5) << apc6.get() 
+    //               << " ^5 " << setprecision(3) << setw(5) << apc5.get() 
+    //               << " ^4 " << setprecision(3) << setw(5) << apc4.get() 
+    //               << " ^3 " << setprecision(3) << setw(5) << apc3.get() 
+    //               << " ^2 " << setprecision(3) << setw(5) << apc2.get() 
+    entry.content << " H " << (cache_hit ? 1 : 0)
+                  << " Cy " << setw(4) << (current_core_cycle[0] - pre_cycle)
+                  << " MSHR " << setw(2) << MSHR.occupancy 
+                  << page_colors.getColor((current_page << 16) | relative2page_delta)
+                  << "Δ " << setw(3) << (delta_block)
+                  << " Blk " << setw(3) << (relative2page_delta)
+                  << " PgBlkΔ " << setw(3) << ((int64_t) relative2page_delta - (int64_t)pre_block2pg) 
+                //   << " BlockΔ " << setw(3) << (pre_block_addr - block_addr)
+                  << ip_colors.getColor(ip)
+                  << " pre_IPΔ " << setw(3) << (pre_delta_ip)
+                  << RESET
+                  << " PgΔ " << setw(4) << ((int64_t)pre_page - (int64_t)current_page)
+                  << " Pg " << setw(11) << current_page 
+                  << RESET
+                  << ip_colors.getColor(ip)
+                  << "  IP  " << setw(13) << ip // << " Type " << setw(3) << (int)type
+                  << RESET << endl;
+        print_buffer.push_back(move(entry));
+        // store previous delta ip 
+        pre_delta_ip = delta_ip;
+    
+    // Flush when counter reaches NUM_POST_ENTRIES
+        
+    // prefetch_line(ip, addr, addr >> LOG2_BLOCK_SIZE << LOG2_BLOCK_SIZE, FILL_L1, 0);
+    
+    pre_page = current_page;
+    pre_block2pg = relative2page_delta;
+    pre_block_addr = block_addr;
+
+    pre_cycle = current_core_cycle[0];
+    pre_pre_ip = pre_ip;
+    pre_delta_ip = delta_ip;
+    delta_ip = ip - pre_ip;
+    pre_ip = ip;
+
+    cnt++;
+
+  return metadata_in;
+}
+
+uint32_t CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in)
+{
+  return metadata_in;
+}
+#include <unordered_map>
+#include <vector>
+#include <algorithm>
+#include <iostream>
+
+void CACHE::l2c_prefetcher_final_stats()
+{
+    // Print counts grouped by ranges
+    cout << "ALL RAW COUNTS: " << endl;
+    cout << "DELTA -63 to -32: ";
+    for (int i = 0; i <= 31; i++) {
+        cout << delta_distribution_count[i] << ";";
+    }
+    cout << endl;
+    
+    cout << "DELTA -31 to -1: ";
+    for (int i = 32; i <= 62; i++) {
+        cout << delta_distribution_count[i] << ";";
+    }
+    cout << endl;
+    
+    cout << "DELTA +1 to +31: ";
+    for (int i = 63; i <= 93; i++) {
+        cout << delta_distribution_count[i] << ";";
+    }
+    cout << endl;
+    
+    cout << "DELTA +32 to +63: ";
+    for (int i = 94; i <= 125; i++) {
+        cout << delta_distribution_count[i] << ";";
+    }
+    cout << endl;
+
+    // Calculate total
+    uint64_t total = 0;
+    for (int i = 0; i < 126; i++) {
+        total += delta_distribution_count[i];
+    }
+    
+    // Create hashmap
+    unordered_map<int, double> delta_map;
+    
+    // Print ratios grouped by ranges
+    cout << "ALL RATIO COUNTS AS IS: " << endl;
+    cout << "DELTA -63 to -32: ";
+    for (int i = 0; i <= 31; i++) {
+        double ratio = (double)delta_distribution_count[i]/(double)total;
+        cout << ratio << ";";
+        int delta_value = get_delta_from_idx(i);
+        delta_map[delta_value] = ratio;
+    }
+    cout << endl;
+    
+    cout << "DELTA -31 to -1: ";
+    for (int i = 32; i <= 62; i++) {
+        double ratio = (double)delta_distribution_count[i]/(double)total;
+        cout << ratio << ";";
+        int delta_value = get_delta_from_idx(i);
+        delta_map[delta_value] = ratio;
+    }
+    cout << endl;
+    
+    cout << "DELTA +1 to +31: ";
+    for (int i = 63; i <= 93; i++) {
+        double ratio = (double)delta_distribution_count[i]/(double)total;
+        cout << ratio << ";";
+        int delta_value = get_delta_from_idx(i);
+        delta_map[delta_value] = ratio;
+    }
+    cout << endl;
+    
+    cout << "DELTA +32 to +63: ";
+    for (int i = 94; i <= 125; i++) {
+        double ratio = (double)delta_distribution_count[i]/(double)total;
+        cout << ratio << ";";
+        int delta_value = get_delta_from_idx(i);
+        delta_map[delta_value] = ratio;
+    }
+    cout << endl;
+
+    // Sort and group
+    cout << "ALL RATIO COUNTS SORTED: " << endl;
+    cout << "(map_size: " << delta_map.size() << ") " << endl;
+    vector<pair<int, double>> sorted_deltas(delta_map.begin(), delta_map.end());
+    sort(sorted_deltas.begin(), sorted_deltas.end(), [](const pair<int, double>& a, const pair<int, double>& b) {
+        return a.second > b.second;
+    });
+    
+    // Group sorted results by ranges
+    vector<string> range_outputs[4];
+    for (const auto& [delta, ratio] : sorted_deltas) {
+        if (ratio > 0.0) {
+            string entry = ";" + to_string(delta) + ":" + to_string(ratio) + ";";
+            if (delta >= -63 && delta <= -32) {
+                range_outputs[0].push_back(entry);
+            } else if (delta >= -31 && delta <= -1) {
+                range_outputs[1].push_back(entry);
+            } else if (delta >= 1 && delta <= 31) {
+                range_outputs[2].push_back(entry);
+            } else if (delta >= 32 && delta <= 63) {
+                range_outputs[3].push_back(entry);
+            }
+        }
+    }
+    
+    cout << "DELTA -63 to -32: ";
+    for (const auto& entry : range_outputs[0]) {
+        cout << entry;
+    }
+    cout << endl;
+    
+    cout << "DELTA -31 to -1: ";
+    for (const auto& entry : range_outputs[1]) {
+        cout << entry;
+    }
+    cout << endl;
+    
+    cout << "DELTA +1 to +31: ";
+    for (const auto& entry : range_outputs[2]) {
+        cout << entry;
+    }
+    cout << endl;
+    
+    cout << "DELTA +32 to +63: ";
+    for (const auto& entry : range_outputs[3]) {
+        cout << entry;
+    }
+    cout << endl;
+}
+// {
+//     for (int i = 0; i < 126; i++) {
+//             cout << "[" << delta_distribution_count[i] << "]";
+//     }
+//     cout << endl;
+//     // sum of all values
+//     uint64_t total = 0;
+//     for (int i = 0; i < 126; i++) {
+//         total += delta_distribution_count[i];
+//     }
+//     // create a hashmap with <delta_block, count>
+//     unordered_map<int, double> delta_map;
+//     cout << endl;
+//     cout << "Delta distribution (raw): ";
+//     // print the content again, but with ratios
+//     for (int i = 0; i < 126; i++) {
+//             cout << "[" << (double)delta_distribution_count[i]/(double)total << "]";
+//             int delta_value = get_delta_from_idx(i);
+//             delta_map[delta_value] = (double)delta_distribution_count[i]/(double)total;
+//     }
+//     cout << endl;
+//     cout << "Delta distribution (sorted): ";
+//     cout << "(map_size: " << delta_map.size() << ") ";
+//     vector<pair<int, double>> sorted_deltas(delta_map.begin(), delta_map.end());
+//     sort(sorted_deltas.begin(), sorted_deltas.end(), [](const pair<int, double>& a, const pair<int, double>& b) {
+//         return a.second > b.second;
+//     });
+//     for (const auto& [delta, ratio] : sorted_deltas) {
+//         if (ratio > 0.0) {  // Filter zero values
+//             cout << "[" << delta << ": " << ratio << "]";
+//         }
+//     }
+//     cout << endl;
+// }

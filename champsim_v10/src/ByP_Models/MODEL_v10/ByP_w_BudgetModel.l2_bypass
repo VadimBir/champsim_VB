@@ -11,15 +11,15 @@
 
 // USEFUL VARS:  usage example
 //  * Cached metrics available without sim_access:
-//  *   lpm[cpu][IS_L1D].c_amat_val   ← ω(L1D)/α(L1D)
-//  *   lpm[cpu][IS_L1D].apc_val      ← α(L1D)/ω(L1D)
-//  *   lpm[cpu][IS_L1D].lpmr_val     ← ω(L1D)/(IC×CPIexe)
-//  *   lpm[cpu][IS_L2C].mu()         ← miss-cycle fraction
-//  *   lpm[cpu][IS_L2C].kappa()      ← pure-miss fraction
+//  *   lpm[cpu][IS_L1D].camat_activeMemCyDivAccesses_ratio   ← ω(L1D)/α(L1D)
+//  *   lpm[cpu][IS_L1D].apc_accessesDivActiveMemCy_ratio      ← α(L1D)/ω(L1D)
+//  *   lpm[cpu][IS_L1D].lpmr_activeMemCyDivIdealCy_ratio     ← ω(L1D)/(IC×CPIexe)
+//  *   lpm[cpu][IS_L2C].µ_sumMissOverlapCyDivMemActiveCy_ratio()         ← miss-cycle fraction
+//  *   lpm[cpu][IS_L2C].κ_pureMissCyDivSumMissOverlapCy_ratio()      ← pure-miss fraction
 //  *
 //  * Also raw counters:
 //  *   lpm[cpu][IS_L1D].h, .m, .x, .e
-//  *   lpm[cpu][IS_L1D].omega()
+//  *   lpm[cpu][IS_L1D].ω_numMemActiveCy()
 
 // L2C->MSHR.occupancy      L2C->MSHR.SIZE
 // L2C->RQ.occupancy        L2C->RQ.SIZE
@@ -58,11 +58,11 @@ inline bool l2c_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
     double w_lpmr_llc  = lpm[cpu][LLC_type].w_lpmr_val;
 
     // Fallback to cumulative if windowed not ready
-    if (w_camat_l2c < 0.001) w_camat_l2c = lpm[cpu][L2C_type].c_amat_val;
-    if (w_apc_l1d < 0.001)   w_apc_l1d   = lpm[cpu][L1D_type].apc_val;
-    if (w_lpmr_l1d < 0.001)  w_lpmr_l1d  = lpm[cpu][L1D_type].lpmr_val;
-    if (w_lpmr_l2c < 0.001)  w_lpmr_l2c  = lpm[cpu][L2C_type].lpmr_val;
-    if (w_lpmr_llc < 0.001)  w_lpmr_llc  = lpm[cpu][LLC_type].lpmr_val;
+    if (w_camat_l2c < 0.001) w_camat_l2c = lpm[cpu][L2C_type].camat_activeMemCyDivAccesses_ratio;
+    if (w_apc_l1d < 0.001)   w_apc_l1d   = lpm[cpu][L1D_type].apc_accessesDivActiveMemCy_ratio;
+    if (w_lpmr_l1d < 0.001)  w_lpmr_l1d  = lpm[cpu][L1D_type].lpmr_activeMemCyDivIdealCy_ratio;
+    if (w_lpmr_l2c < 0.001)  w_lpmr_l2c  = lpm[cpu][L2C_type].lpmr_activeMemCyDivIdealCy_ratio;
+    if (w_lpmr_llc < 0.001)  w_lpmr_llc  = lpm[cpu][LLC_type].lpmr_activeMemCyDivIdealCy_ratio;
 
     // Clamp very small values
     if (w_lpmr_l1d < 0.001) w_lpmr_l1d = 0.001;

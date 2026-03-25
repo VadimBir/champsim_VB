@@ -17,7 +17,7 @@
 
 
 // #define PRINT_STATS_EVERY 1000000
-#define PRINT_STATS_EVERY 100000
+#define PRINT_STATS_EVERY 500000
 #ifdef CRC2_COMPILE
 #define STAT_PRINTING_PERIOD PRINT_STATS_EVERY // print stats every X instructions
 #else
@@ -620,26 +620,25 @@ class alignas(64) O3_CPU {
         fetch_instruction(),
         schedule_instruction(), 
         execute_instruction(),
-        schedule_memory_instruction(),
-        execute_memory_instruction(),
-        do_scheduling(uint16_t rob_index), 
-        
-        reg_dependency_simd_v2(uint16_t rob_index),
+        schedule_memory_instruction();
+    void execute_memory_instruction();
+    void do_scheduling(uint16_t rob_index);
+
+    void reg_dependency_simd_v2(uint16_t rob_index),
         apply_raw_dependency(uint32_t producer_idx, uint32_t consumer_idx, uint32_t source_idx),
-        
-        reg_dependency(uint16_t rob_index),
-        do_execution(uint16_t rob_index),
-        do_memory_scheduling(uint16_t rob_index),
-        operate_lsq(),
-        complete_execution(uint16_t rob_index),
-        reg_RAW_dependency(uint16_t prior, uint16_t current, uint8_t source_index),
+        operate_lsq();
+    void reg_dependency(uint16_t rob_index);
+    void do_execution(uint16_t rob_index);
+    void do_memory_scheduling(uint16_t rob_index);
+    void complete_execution(uint16_t rob_index);
+    void reg_RAW_dependency(uint16_t prior, uint16_t current, uint8_t source_index),
         reg_RAW_release(uint16_t rob_index),
         handle_o3_fetch(PACKET *current_packet, uint32_t cache_type),
         handle_merged_translation(PACKET *provider),
         handle_merged_load(PACKET *provider),
-        release_load_queue(uint16_t lq_index),
         complete_instr_fetch(PACKET_QUEUE *queue, uint8_t is_it_tlb),
         complete_data_fetch(PACKET_QUEUE *queue, uint8_t is_it_tlb);
+    void release_load_queue(uint16_t lq_index);
         
         void initialize_core();
         void add_load_queue(uint16_t rob_index, uint32_t data_index),
