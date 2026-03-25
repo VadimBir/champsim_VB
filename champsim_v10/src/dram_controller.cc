@@ -117,10 +117,8 @@ void MEMORY_CONTROLLER::operate()
                         bank_request[ch][r][b].cycle_available > current_core_cycle[cpu])
                         miss_active = true;
 
-        // alpha: use RQ ROW_BUFFER_HIT + ROW_BUFFER_MISS summed across channels as access proxy
-        uint64_t alpha = 0;
-        for (uint32_t ch = 0; ch < DRAM_CHANNELS; ch++)
-            alpha += RQ[ch].ROW_BUFFER_HIT + RQ[ch].ROW_BUFFER_MISS;
+        // alpha: LOAD completions served to this CPU (analogous to sim_access[cpu][LOAD] in CACHE)
+        uint64_t alpha = sim_read_access[cpu];
 
         lpm[cpu][LPM_DRAM].tick(hit_active, miss_active);
 
@@ -415,6 +413,8 @@ void MEMORY_CONTROLLER::process(PACKET_QUEUE *queue)
                 // cout << " current_cycle: " << current_core_cycle[op_cpu] << " event_cycle: " << queue->entry[request_index].event_cycle << endl; });
 
                 // send data back to the core cache hierarchy
+                if (warmup_complete[op_cpu])
+                    sim_read_access[op_cpu]++;
 #ifdef BYPASS_LLC_LOGIC
                 if (queue->entry[request_index].llc_bypassed) {
                     // LLC was bypassed: skip LLC->return_data(), call LLC's upper (L2C) directly

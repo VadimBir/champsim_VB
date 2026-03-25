@@ -780,10 +780,15 @@ class CACHE : public MEMORY {
     }
 
     // Increments sim_miss/sim_access and wByP counters.
+    // wByP skipped for llc_bypassed: already counted at bypass-decision time in handle_read_miss_bypass.
     inline void handle_fill_stats(uint16_t fill_cpu, uint16_t mshr_index) {
         sim_miss[fill_cpu][MSHR.entry[mshr_index].type]++;
         sim_access[fill_cpu][MSHR.entry[mshr_index].type]++;
-        if (MSHR.entry[mshr_index].type == LOAD) {
+        if (MSHR.entry[mshr_index].type == LOAD
+#ifdef BYPASS_LLC_LOGIC
+            && !MSHR.entry[mshr_index].llc_bypassed
+#endif
+        ) {
             sim_miss_wByP[fill_cpu]++;
             sim_access_wByP[fill_cpu]++;
         }

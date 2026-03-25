@@ -31,7 +31,7 @@ static bool llc_bypass_init = false;
 
 inline bool llc_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
     if (llc_bypass_init == false){
-        cout << "Bypass on: \nNO BYBPASS LOGIC" << endl;
+        cout << "Bypass on: \nComparing #hit vs #miss cycles on 50%> byp" << endl;
         llc_bypass_init = true;
     }
     return false;

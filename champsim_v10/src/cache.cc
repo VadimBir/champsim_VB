@@ -728,8 +728,19 @@ void CACHE::operate() {
 #endif
 
         /* ---- tick + update cached metrics ---- */
-        lpm_operate(cpu, cache_type, hit_active, miss_active,
-                    α, has_byp);
+        if (cache_type == IS_LLC) {
+            /* LLC is shared — tick lpm for every CPU that completed warmup */
+            for (uint32_t c = 0; c < NUM_CPUS; c++) {
+                if (!warmup_complete[c]) continue;
+                uint64_t α_c = 0;
+                for (int t = 0; t < NUM_TYPES; t++)
+                    α_c += sim_access[c][t];
+                lpm_operate(c, cache_type, hit_active, miss_active, α_c, has_byp);
+            }
+        } else {
+            lpm_operate(cpu, cache_type, hit_active, miss_active,
+                        α, has_byp);
+        }
     }
     /* >>> end LPM <<< */
     handle_fill();
@@ -1271,26 +1282,18 @@ int CACHE::add_pq(PACKET *packet) {
 
 void CACHE::return_data(PACKET *packet) {
     // check MSHR information
-#ifdef BYPASS_DEBUG
-    if (packet->instr_id == 2001730 || (uint64_t) packet->address == 1514623703326)
-        cout << NAME << " PROBLEM PACKET RETURNED!!!!";
-#endif
     int mshr_index = check_mshr(packet);
-#ifdef BYPASS_DEBUG
-    if (packet->l1_bypassed == 1)
-        cerr << "CATCH!!!! " << "MSHR: " << mshr_index << " instrID: " << packet->instr_id <<  endl;
-#endif
 
-#ifdef TRUE_SANITY_CHECK
-    // sanity check
-    if (mshr_index == -1) {
-        cerr << "[" << NAME << "_MSHR] " << __func__ << " instr_id: " << packet->instr_id << " cannot find a matching entry!";
-        cerr << " full_addr: " << hex << packet->full_addr;
-        cerr << " addr: " << packet->address << dec;
-        cerr << " event: " << packet->event_cycle << " curr: " << current_core_cycle[packet->cpu] << endl;
-        assert(0);
-    }
-#endif
+    #ifdef TRUE_SANITY_CHECK
+        // sanity check
+        if (mshr_index == -1) {
+            cerr << "[" << NAME << "_MSHR] " << __func__ << " instr_id: " << packet->instr_id << " cannot find a matching entry!";
+            cerr << " full_addr: " << hex << packet->full_addr;
+            cerr << " addr: " << packet->address << dec;
+            cerr << " event: " << packet->event_cycle << " curr: " << current_core_cycle[packet->cpu] << endl;
+            assert(0);
+        }
+    #endif
     DP( if ((current_core_cycle[cpu] > 2064400) || warmup_complete[packet->cpu]) {
     cout << "[" << NAME << "MSHR_ret_before] " <<  __func__;
     dump_req(packet);

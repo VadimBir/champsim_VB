@@ -25,6 +25,7 @@ class MEMORY_CONTROLLER : public MEMORY {
 
     BANK_REQUEST bank_request[DRAM_CHANNELS][DRAM_RANKS][DRAM_BANKS];
 
+    uint64_t sim_read_access[NUM_CPUS];  // post-warmup LOAD completions per CPU (analogous to sim_access[cpu][LOAD] in CACHE)
 
     // queues
     PACKET_QUEUE WQ[DRAM_CHANNELS];
@@ -101,6 +102,7 @@ class MEMORY_CONTROLLER : public MEMORY {
         }
 
         fill_level = FILL_DRAM;
+        for (uint32_t c = 0; c < NUM_CPUS; c++) sim_read_access[c] = 0;
     };
 
 
@@ -163,6 +165,7 @@ class MEMORY_CONTROLLER : public MEMORY {
             WQ[i].quick_reset();
             RQ[i].quick_reset();
         }
+        for (uint32_t c = 0; c < NUM_CPUS; c++) sim_read_access[c] = 0;
     }
 
     // destructor
