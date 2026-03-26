@@ -18,6 +18,7 @@ int64_t execution_checksum[NUM_CPUS] = {0}; // the execution checksum to verify 
 O3_CPU ooo_cpu[NUM_CPUS];
 uint64_t current_core_cycle[NUM_CPUS], stall_cycle[NUM_CPUS];
 alignas(64) uint16_t rob_memory_count[NUM_CPUS] = {0};
+alignas(64) uint16_t next_mem_sched_start[NUM_CPUS] = {0};
 uint32_t SCHEDULING_LATENCY = 0, EXEC_LATENCY = 0;
 
 #include <cstdint>
@@ -604,7 +605,6 @@ void O3_CPU::fetch_instruction()
 // II. Instruction is completed
 // III. Instruction is retired
 uint64_t* rob_events_ptr;
-uint64_t* event_cycle_ptr;
 #include <bitset>
 std::bitset<ROB_SIZE> valid_bits;
 uint32_t stop_index;
@@ -628,7 +628,6 @@ void O3_CPU::schedule_instruction()
 
     rob_events_ptr = rob_events.raw[cpu];
     curr_cycle = current_core_cycle[cpu];
-    // event_cycle_ptr = &event_cycle_Arr[cpu][0];
 
     valid_bits.reset();
     stop_index = ROB.head;
@@ -846,9 +845,9 @@ void O3_CPU::do_execution(const uint16_t rob_index)
 }
 
 uint16_t scan_end;
-uint16_t start;
 uint16_t effective_limit;
 uint16_t end1;
+uint32_t num_searched;
 
 // uint64_t flat_array[ROB_SIZE];
 
@@ -910,7 +909,8 @@ void O3_CPU::schedule_memory_instruction()
 
    const uint32_t limit = ROB.next_schedule;
    const uint64_t current_cycle = current_core_cycle[cpu];
-   num_searched = 0;
+   const uint16_t total_mem = rob_memory_count[cpu];
+   uint16_t mem_seen = 0;
 
    scan_end = (ROB.head + ROB.occupancy <= ROB.SIZE)
                        ? (ROB.head + ROB.occupancy)
@@ -932,26 +932,27 @@ void O3_CPU::schedule_memory_instruction()
             if ((entry & FETCH_MASK) != COMPLETE_fetch_t)
                 return false;
 
-            if (num_searched >= SCHEDULER_SIZE)
-                return false;
-
             const uint64_t ev_cycle = entry >> 8;
             if (ev_cycle > current_cycle)
                 return false;
 
             if ((entry & SCHED_MASK) == SCHED_READY_STATE)
                 valid_bits.set(i);
+
+            if (++mem_seen >= total_mem)
+                return false;
         }
         return true;
     };
 
    effective_limit = (scan_end < limit) ? scan_end : limit;
 
-   if (ROB.head < effective_limit) {
-       scan(ROB.head, effective_limit);
+   const uint32_t sched_start = next_mem_sched_start[cpu];
+   if (sched_start < effective_limit) {
+       scan(sched_start, effective_limit);
    } else {
-       end1 = (ROB.head < limit) ? limit : ROB.SIZE;
-       if (scan(ROB.head, end1) && (ROB.head < limit))
+       end1 = (sched_start < limit) ? limit : ROB.SIZE;
+       if (scan(sched_start, end1) && (sched_start < limit))
            scan(0, effective_limit);
    }
 
@@ -983,6 +984,8 @@ inline void O3_CPU::do_memory_scheduling(const uint16_t rob_index)
     uint16_t not_available = check_and_add_lsq(rob_index);
     if (not_available == 0) {
         rob_events.entries[cpu][rob_index].scheduled = COMPLETED;
+        if (rob_index == next_mem_sched_start[cpu])
+            next_mem_sched_start[cpu] = (rob_index + 1 >= ROB.SIZE) ? 0 : rob_index + 1;
         if (ROB.entry[rob_index]->executed == 0) // it could be already set to COMPLETED due to store-to-load forwarding
             ROB.entry[rob_index]->executed  = INFLIGHT;
 
@@ -1997,6 +2000,8 @@ void O3_CPU::retire_rob()
         ROB.head++;
         if (ROB.head == ROB.SIZE)
             ROB.head = 0;
+        if (next_mem_sched_start[cpu] == ROB.head - 1 || (ROB.head == 0 && next_mem_sched_start[cpu] == ROB.SIZE - 1))
+            next_mem_sched_start[cpu] = ROB.head;
         ROB.occupancy--;
         completed_executions--;
         num_retired++;

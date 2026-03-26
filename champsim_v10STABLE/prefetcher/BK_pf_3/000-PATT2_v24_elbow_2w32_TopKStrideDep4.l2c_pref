@@ -1,0 +1,1507 @@
+/*
+
+*/
+
+#include "cache.h"
+#include <map>
+#include <unordered_map>
+#include <vector>
+#include <utility>
+#include <algorithm>
+#include <numeric>
+#include <list>
+#include <cstdint>
+#include <unordered_set>
+#include <iomanip>
+#include <string>
+
+using namespace std;
+
+#define DGB_ALWAYS_PF false
+// #define DBG_PF_DEPTH_PROCESSING_PRINT true
+#define DBG_PF_DEPTH_PROCESSING_PRINT false
+#define DBG_PFing_CANDIDATES_PRINT false
+// #define DBG_PFing_CANDIDATES_PRINT true
+
+// #define DGB_PF_HASH_ENCODE_PRINT true
+#define DGB_PF_HASH_ENCODE_PRINT false
+
+// #define DBG_PF_FINAL_CANDIDATES_PRINT true
+#define DBG_PF_FINAL_CANDIDATES_PRINT false
+
+#define DBG_PF_TRACKER_PRINT false
+#define TRACKER_STATS_PRINT_PERIOD 50000
+
+// Global variables - EXACT as original
+unordered_map<int, int> prefetcher_count;
+unordered_map<int, bool> isPfActive;
+unordered_map<int, int> number_of_inRowPfInactivity;
+double entryFrequency = 0;
+int new_entry_count = 0;
+int pf_cnt = 0;
+uint64_t NUM_CACHELINES = 0;
+uint64_t pre_previous_addr = 0;
+uint64_t previous_addr = 0;
+uint64_t pf_addr = 0;
+int64_t cnt = 0;
+vector<uint8_t> debugger = {};
+int MSHR_win_cnt = 0;
+int print_cnt = 0;
+double nxtH = 0;
+unordered_map<int,int> nxtH_cnt;
+unordered_map<int,double> pf_nxtH_acc;
+int flagged = 0;
+unordered_map<int,int> pf_guess_cnt;
+int tH_cnt = 0;
+vector<pair<uint64_t, int>> currentRound_prefetches;
+double nxtAddrHit_IP_Stride_avg = 0;
+int nxtAddrHit_IP_Stride_avg_cnt = 0;
+unordered_map<int,double> pf_nxtH_acc_avg;
+unordered_map<int,int> pf_nxtH_acc_cnt;
+uint64_t preIP = 0;
+
+#define MT_DEGREE 1 
+#define MT_DEPTH 1 
+#define IP_TRACKER_COUNT 320
+#define PREFETCH_DEGREE 8
+#define IPSTR_ID 0
+#define WINDOW 512
+
+// Number of MT prefetchers (excluding IP stride which is index 0)
+#define NUM_MT_PREFETCHERS 4
+
+// Config struct with string-based tracking
+struct MT_Config {
+    int lru_size = 0;
+    int tracking_max = 0; 
+    int tracking_min = 0;
+    int percent_threshold = 0;
+    int prefetcher_id = 0;
+    int IP_BITS = 20;
+    int IP_MODULO_BOUND = 2048;
+    int8_t COUNT_BITS = 16;
+    string tracking_key = "ip";
+    string tracking_value = "delta_block";
+    string counter_policy = "CAP";
+    string candidate_selection_policy = "TopK";
+    // string candidate_selection_policy = "Elbow";
+    int depth = 1;
+};
+
+// Simplified access data structure - only current access info
+struct AccessData {
+    // Current access
+    uint64_t addr;
+    uint64_t ip;
+    uint64_t block;
+    uint64_t page;
+    int64_t block2page;
+    int64_t delta_ip;               // Delta = prev - current access to show the change
+    int64_t delta_page;             // Delta = prev - current access to show the change
+    int64_t delta_block;            // Delta = prev - current access to show the change
+    
+    vector<uint64_t> prev_N_IP; // THIS IS A MUST FOR DEPTH_DELTA_BLOCK AS ITS ENTRIES ARE e.g: IP1 WITH (DEPTH1) ADDR1 - ADDR2, (DEPTH2) ADDR2 - ADDR3, (DEPTH3) ADDR3 - ADDR4 and (DEPTH4) ADDR4-ADDR5 
+    vector<uint64_t> prev_N_addr;
+    vector<int64_t> depth_deltas;
+    unordered_map<int64_t, uint64_t>* key_prev_block_ref = nullptr;
+    unordered_map<int64_t, int64_t>* key_prev_stride_ref = nullptr; // used to verify the stride observed in second occurance and compare with stride in third occurance.
+    bool is_filled = false;
+    
+    AccessData() : addr(0), ip(0), block(0), page(0), block2page(0) {}
+    
+    void init_process_access(uint64_t new_addr, uint64_t new_ip) {
+        addr = new_addr; // BASICALLY A BLOCK
+        ip = new_ip;
+        block = addr; 
+        page = addr >> 12;
+        
+        // Calculate block number relative to page start
+        uint64_t page_start_block = page << LOG2_PAGE_SIZE;
+        // get page's first block 
+        // page_start = page << 12; // page * 4096
+        block2page = block - page_start_block;
+        is_filled = true;
+        
+        // store previous N addresses and IP // !!! complex management
+        prev_N_addr.push_back(new_addr);
+        prev_N_IP.push_back(new_ip);
+        
+        // For any depth N I need depth+1 elements to be able to calc last depth N  
+        if (prev_N_IP.size() > 64) {              // FOR SIMPLICITY AND COVERAGE OF ALL CASES 64 IS SUFFICIENT AND IDMM IS ONE TO APPROPRIATELY USE IT.
+            prev_N_addr.erase(prev_N_addr.begin());
+            prev_N_IP.erase(prev_N_IP.begin());
+        }
+    }    
+    
+    int64_t get_key(MT_Config* cfg,  AccessData& prev_access_data) const {
+        string name = cfg->tracking_key;
+        // if (name == "addr") return addr; // basically is a block
+        if (name == "block") return block;
+        if (name == "delta_block") return (int64_t)(prev_access_data.block)-(int64_t)(block);
+        if (name == "block2page") return block2page;
+        
+        if (name == "ip") return get_fibo_hash_ip(cfg, ip);
+        // depth IP is because relative to past IP we make an entry.
+        if (name == "depth_ip") {
+            if (prev_N_IP.size() > cfg->depth) {
+                // FROM END GET IP AND (DEPTH 1) is ADDR1 - ADDR2, (DEPTH2) ADDR2 - ADDR3, (DEPTH3) ADDR3 - ADDR4 and (DEPTH4) ADDR4-ADDR5  
+                // depth +1 because at min we need at minimum lastIDX-1 IP to calculate that IP's ADDr - next IP's ADDR 
+                int firstIP_idx = prev_N_IP.size() - cfg->depth - 1; // if D=4 and size=8, then idx7 is d4 idx6 is d3 idx5 is d2 idx4 is d1 the one used i.e. lastIDX-depth
+                return (int64_t)(prev_N_IP[firstIP_idx]); 
+            }
+            return INT64_MIN;
+        }
+        if (name == "delta_ip") return (int64_t)(prev_access_data.ip)-(int64_t)(ip);
+        
+        // if (name == "pre_delta_ip") return (int64_t)(prev_access_data.delta_ip); 
+        if (name == "page") return page;
+        if (name == "delta_page") return (int64_t)(prev_access_data.page)-(int64_t)(page);
+        return 0;
+    }
+    
+    int64_t get_value(MT_Config* cfg, AccessData& prev_access_data) {
+        string name = cfg->tracking_value;
+        if (name == "addr") return addr;
+        if (name == "block2page") return block2page;
+        if (name == "block") return block;
+        if (name == "delta_block") return (int64_t)(prev_access_data.block)-(int64_t)(block);
+        if (name == "delta_ip") return (int64_t)(prev_access_data.ip)-(int64_t)(ip);
+        // stride: 1. get prev occurance 2. update previous to new occurance 3. calculate stride from previous occurance with 
+        // SEEMS TO WORK // if (name == "stride_block") { uint64_t prev = (*key_prev_block_ref)[ip]; (*key_prev_block_ref)[ip] = block; if (prev != 0) return (int64_t) block - (int64_t) prev; return INT64_MIN;}
+        
+        // three-pahse stride: 1. on IP store its block 2. on repeat IP get its prev occurance block 3. calculate stride, update the prev occurance and remember stride 4. only when third ocurance of IP occur we calculate the new stride and compare with prev stride of same IP
+        // If and only if the third IP occurance gives the same stride as second occurance, we train table!!! 
+        
+        // MISTAKE: unline trad IP Stride no third verification here 
+        // if (name == "stride_block") { uint64_t prev = (key_prev_block_ref)[prev_access_data.ip]; (key_prev_block_ref)[prev_access_data.ip] = prev_access_data.block; if (prev != 0) return (int64_t) prev_access_data.block - (int64_t) prev; return INT64_MIN;}
+        
+        if (name == "stride_block") { 
+            uint64_t prev_addr = (*key_prev_block_ref)[prev_access_data.ip]; 
+            (*key_prev_block_ref)[prev_access_data.ip] = block;
+            if (prev_addr != 0) { 
+                int64_t current_stride = (int64_t)block - (int64_t)prev_addr; 
+                int64_t last_stride = (*key_prev_stride_ref)[prev_access_data.ip]; 
+                (*key_prev_stride_ref)[prev_access_data.ip] = current_stride;
+                if (last_stride != 0 && current_stride == last_stride) {
+                    return current_stride;
+                }
+            } 
+            return INT64_MIN;
+        } 
+        
+        if (name == "depth_delta_block") {
+            depth_deltas.clear();// Clear previous deltas
+            // populate array for all deltas between all hist addr. 
+            for (int i = 0; i < prev_N_addr.size()-1; i++) { // size-1 because last i needs i+1 idx value 
+                depth_deltas.push_back((int64_t)prev_N_addr[i] - (int64_t)prev_N_addr[i+1]);
+            }            
+            // Return depth=1 delta (most recent) or INT64_MIN if not available
+            if (!depth_deltas.empty()) { 
+                return depth_deltas[0]; 
+            }
+            return INT64_MIN;
+        }
+        
+        return 0;
+    }
+
+    int64_t populateDepthValueVector(MT_Config* cfg, AccessData& access_data) {
+        depth_deltas.clear();// Clear previous deltas
+        // populate array for all deltas between all hist addr. 
+        for (int i = 0; i < prev_N_addr.size()-1; i++) { // size-1 because last i needs i+1 idx value 
+            depth_deltas.push_back((int64_t)prev_N_addr[i] - (int64_t)prev_N_addr[i+1]);
+        }            
+        // Return depth=1 delta (most recent) or INT64_MIN if not available
+        if (!depth_deltas.empty()) { 
+            // return depth_deltas[0]; // DOES GIVE SOME BETTER RESULTS 
+            int firstDelta_idx = (access_data.depth_deltas.size() - cfg->depth);
+            return depth_deltas[firstDelta_idx];
+            // return depth_deltas[0]; // DOES GIVE SOME BETTER RESULTS 
+        }
+        return INT64_MIN;
+    }
+
+    uint64_t get_fibo_hash_ip(MT_Config* cfg, uint64_t ip) const {
+        static constexpr uint64_t fibonacci_multiplier = 11400714819323198486ULL;
+        // uint64_t hash_result = ip * fibonacci_multiplier;
+        // uint64_t hash_result = ip ^ block;
+        // uint64_t hash_tranc = (hash_result >> (64-cfg->IP_BITS));
+        
+        uint64_t hash_result = (ip>>1) ^ (ip >> 4) ;
+        // extract IP_BITS low bits for indexing
+        uint64_t hash_tranc = hash_result & ((1ULL << cfg->IP_BITS) - 1);
+        if (DGB_PF_HASH_ENCODE_PRINT){
+            cout << "IP#: " << ip << ", Block#: " << block << ", Hash: " << hash_result << "PgHash: " << hash_tranc << endl;
+        }
+
+        return hash_tranc;
+    }
+};
+
+// Single shared AccessData instance
+AccessData shared_access_data;
+
+// CHANGED: Array-based config and prefetcher instances
+// Index 0: IP Stride, Index 1-8: MT prefetchers
+MT_Config mt_configs[NUM_MT_PREFETCHERS + 1];  // +1 for IP stride at index 0
+
+class IDMM {
+    public:
+    AccessData prev_access_data; // used for table training. Previous Key: Current Value. This MUST be instance specific
+    AccessData pre_prev_access_data; // used for to store the first occurance IP block and second occurance IP block
+    int64_t training_key = 0;
+    pair<int64_t, int64_t> training_value = {0, 0};
+    int64_t prediction_key = 0;
+    
+    // IDMM() : markov_LRU_front(0), pf_addr(0), config_ptr(nullptr), MT_limit(0) {}
+    IDMM() : markov_LRU_front(0), pf_addr(0), config_ptr(nullptr), MT_limit(0) {
+        prev_access_data.key_prev_block_ref = &key_prev_block;
+        pre_prev_access_data.key_prev_block_ref = &key_prev_block;
+        prev_access_data.key_prev_stride_ref = &key_prev_stride;      // Add
+        pre_prev_access_data.key_prev_stride_ref = &key_prev_stride;  // Add
+    }
+    
+    void set_config(MT_Config* cfg) {
+        config_ptr = cfg;
+        MT_limit = cfg->lru_size;
+        markov_LRU.clear();
+        markov_LRU.reserve(MT_limit);
+    }
+
+    // 11-phase operation: 
+        // 4Ph (normal):            Predict via table -> Training val depth1 -> Train Table -> Manage Replacement policy
+        // 4Ph (preprocessChains)   -> Interleaf depths with top ranks -> Void Predict Gap Depth -> remove Orphaned chain leftovers -> Flatten depth deltas (artifact - if I do chain divergence prefetch)
+        // 3Ph (processChains)      -> get depth train Vals -> loop: (depth>1 training -> Manage replacement policy)
+    // CHANGED: Return vector of tuples instead of pairs to include count
+    vector<tuple<int64_t, int64_t, int>> operate(AccessData& access_data) {
+        // IDMM has extra hashtable for stride functionality, input access_data is one created elsewhere and is global. 
+        // here we asign a reference to key_prev_block to access_data, so that it can be used for stride calculations if needed according to config
+        access_data.key_prev_block_ref = &key_prev_block;
+        access_data.key_prev_stride_ref = &key_prev_stride;  // specifically used for stride
+        
+        // REMINDER: TEST CASE: EXIT UPON REPEATED ACCESS OF SAME KEY AND VAL BLOCK, i.e. TRAINING AND PREDICTION KEY ARE THE SAME
+    // PHASE 1. Get key and value based on per MT config 
+        if (config_ptr->tracking_key == "depth_ip"){ // PREDICTION IS BASED ON CURR IP NOT ONE DEPTH TIMES AGO
+            access_data.get_key(config_ptr, prev_access_data); // NOTE: We use access_data itself 
+            prediction_key = access_data.get_fibo_hash_ip(config_ptr, access_data.ip);
+        } else {
+            prediction_key = access_data.get_key(config_ptr, prev_access_data); // NOTE: We do use access_data itself 
+        }
+
+    // PHASE 2. Training requires, previous singleton data, or pre_prev data with prev data for delta. 
+        if (config_ptr->tracking_key == "depth_ip"){
+            prev_access_data.get_key(config_ptr, pre_prev_access_data); // during training this comes from previous access (which initially is NON but compiler is fine) if issue, must have a check
+            int firstIP_idx = access_data.prev_N_IP.size() - config_ptr->depth - 1; // if D=4 and size=8, then idx7 is d4 idx6 is d3 idx5 is d2 idx4 is d1 the one used i.e. lastIDX-depth
+            training_key = access_data.get_fibo_hash_ip(config_ptr, access_data.prev_N_IP[firstIP_idx]);
+        } else { 
+            training_key = prev_access_data.get_key(config_ptr, pre_prev_access_data); // during training this comes from previous access (which initially is NON but compiler is fine) if issue, must have a check
+        }
+        
+        // training_value = (int64_t)prev_access_data.block-(int64_t)access_data.block;      
+        int64_t single_training_value;
+        if (config_ptr->tracking_value == "depth_delta_block"){
+            int firstAddr_idx = access_data.prev_N_addr.size()-config_ptr->depth -1; // if D=4 and size=8, then idx7 is d4 idx6 is d3 idx5 is d2 idx4 is d1 the one used i.e. lastIDX-depth 
+            uint64_t depthAgoAddr = access_data.prev_N_addr[firstAddr_idx];
+            // THIS IS WHERE WE DO NOT USE depth+1
+            uint64_t next_depthAgoAddr = access_data.prev_N_addr[firstAddr_idx+1]; 
+            // single_training_value = (int64_t)(depthAgoAddr)-(int64_t)(next_depthAgoAddr); // depth1 logic ==  previous - current 
+            single_training_value = access_data.populateDepthValueVector(config_ptr, access_data);
+            // access_data.populateDepthValueVector(config_ptr, access_data);
+        } else {
+            single_training_value = access_data.get_value(config_ptr, prev_access_data); // NOTE: We use access_data itself 
+        }
+        
+        training_value = make_pair(single_training_value, 1); // convert val to pair(val:depth)
+        
+    // PHASE 3. Update the markov table
+        IteratorType key_it;
+        unordered_map<pair<int64_t, int64_t>, int, PairHash>::iterator val_it = markov_table.begin()->second.end();
+        
+        bool madeDepth1Entry = false; 
+
+        // Range-based training filter: only train on meaningful spatial displacements
+        if ((abs(training_value.first) >= config_ptr->tracking_min && abs(training_value.first) <= config_ptr->tracking_max) &&
+            (training_value.first != -1 && training_value.first != -2 && training_value.first != -4)) {
+            int64_t newCounter = inc_count(markov_table[training_key][training_value]);
+            markov_table[training_key][training_value] = newCounter;
+            madeDepth1Entry = true;
+            key_it = markov_table.find(training_key);
+            if (key_it != markov_table.end()) {
+                val_it = key_it->second.find(training_value);
+            }
+        }
+
+/* 
+    ==========================================================
+        
+        LARGE ISSUE WITH CANDIDATES ... 
+        1. EITHER I MUST SELECT TOP BASED ON OVERALL COUNT i.e. MULTIPLE SAME DEPTH CANDIDATES POSSIBLE 
+        2. OR FIRST FOR ANY DEPTH I MUST FIRST SELECT ALL TOP DEPTH CANDIDATES AND IF ROOM GO TO NEXT DEPTH?? 
+        3. SHOULD THERE BE AN ORDER?? e.g. Candidate1 be highest depth first, or lowest???
+        Edit: 
+            new phases added ranked[N] Pf depth1[1] depth2[1] depth3[1] ... depth1[2] depth2[2] depth3[2] ...
+            skip rest if depth gapped
+            Q: If I have ALL depth1-8 [1] and NOT ALL rank 2 depth, what I do? 
+                A: NOTHING! IF Use [1] on [2] with depth++ then its Polution. 
+                Why?: Theory - if given [2] depth was possible then MUST existed. 
+                        Contradiction: if [2]dep++ was out due to [2]dep>page then [2]dep must have NOT HAVE existed.
+                        ISSUE: what if LRU cleaned up? Possible!, which is why we first get candidates. BUT possible. 
+                        BUT Q: What chance LRU evict [2]dep++ but not [2]dep?
+                            A: Theory: init order is dep, then dep++ entry
+                ISSUE: What if [1] never had dep>1 BUT [2] had it.
+                            then 1. if trully important [1] be evicted of count will rebalance [2] to [1]
+                        BUT POSSIBLE TO NEVER BE!!! 
+                            If pattern strides from [1] and [2] accesses with [1] being more frequent!!!!
+                        Why not to retain all depth[2]? 
+                            A: 1. possible to store vector entries instead with val be vectorVal{dep1, dep2 ...}
+                                BUT. ALL depth entries now UNITED 
+                                ISSUE: Redundant dup entries: when e.g. dep2 changes BUT dep3 dep4 ... same 
+                                + HUGE complexity in mananging such entries + No depth granular entries
+                            A: 2. Possible, BUT current management ... is insane + require group tracker 
+    ==========================================================
+*/ 
+    // PHASE 4. manage LRU && Predict next access based on table
+        vector<tuple<int64_t, int64_t, int>> pf_topP;  // CHANGED: Now returns tuples with count
+        if (config_ptr->candidate_selection_policy == "Elbow") {
+            pf_topP = markov_prefetcher_Elbow(prediction_key, key_it, val_it);
+        } else if (config_ptr->candidate_selection_policy == "TopK") {
+            pf_topP = markov_prefetcher_TopK(prediction_key, key_it, val_it);
+        } else { 
+            throw std::runtime_error("Unknown candidate selection policy: " + config_ptr->candidate_selection_policy);
+        }
+
+
+
+    // PHASE 5. INTERLEAF THE TOP GAPS TOGETHER 
+        // REST SHOULD BE ONLY CONTINIOUS DEPTH FROM 1 to N BUT WITH POSSIBLE DUPS 
+        // Sort Match depth: for top d1 mathch top d2, then match top d3, ... then for second d1 match second d2, then match second d3 
+        if (DBG_PF_DEPTH_PROCESSING_PRINT){
+            // print current candidates as is
+            if (!pf_topP.empty()) {
+                std::cout << "Bfr: Inter: ";
+                for (auto& p : pf_topP) {
+                    std::cout << get<0>(p) << ":" << get<1>(p) << ":" << get<2>(p) << ", ";
+                }
+                std::cout << std::endl;
+            }
+        }
+        
+        if (!pf_topP.empty()) {
+            // Group predictions by depth (maintaining frequency order within each depth)
+            map<int64_t, vector<tuple<int64_t, int64_t, int>>> depth_groups;
+            for (auto& p : pf_topP) {
+                depth_groups[get<1>(p)].push_back(p);
+            }
+            
+            // Interleave: take rank i from each depth group
+            vector<tuple<int64_t, int64_t, int>> interleaved;
+            size_t max_size = 0;
+            for (auto& group : depth_groups) max_size = max(max_size, group.second.size());
+            
+            for (size_t rank = 0; rank < max_size; ++rank) {
+                for (auto& group : depth_groups) {
+                    if (rank < group.second.size()) {
+                        interleaved.push_back(group.second[rank]);
+                    }
+                }
+            }
+            
+            pf_topP = std::move(interleaved);
+        }
+        if (DBG_PF_DEPTH_PROCESSING_PRINT){
+            // print current candidates as is
+            if (!pf_topP.empty()) {
+                std::cout << " >Aft: Leafed: ";
+                for (auto& p : pf_topP) {
+                    std::cout << get<0>(p) << ":" << get<1>(p) << ":" << get<2>(p) << ", ";
+                }
+                std::cout << std::endl;
+            }
+        }
+
+    // PHASE 6. CLEAN UP A CHAIN TO VOID OTHER DEPTH AFTER GAP DEPTH 
+        // FIX ARTIFACT (no chain divergence support)        
+
+        // // chain start index
+        // if (get<1>(pf_topP[0]) != 1) {
+        //     // void all candidates
+        //     pf_topP = {};
+        // }
+        // int chain_start_index;
+        // int prev_depth;
+        // for (int i=0;i<pf_topP.size();i++){
+        //     if (get<1>(pf_topP[i])==1) {
+        //         chain_start_index = i;
+        //     } else {
+        //         if (get<1>(pf_topP[i]) <= prev_depth) {
+                    
+        //         }
+        //     }
+        //     prev_depth = get<1>(pf_topP[i]);
+        // }
+
+        // int64_t gap = 1;
+        // while (std::any_of(pf_topP.begin(), pf_topP.end(), [gap](auto& p) { return get<1>(p) == gap; })) ++gap;
+        // pf_topP.erase(std::remove_if(pf_topP.begin(), pf_topP.end(), [gap](auto& p) { return get<1>(p) >= gap; }), pf_topP.end());
+        
+        if (DBG_PF_DEPTH_PROCESSING_PRINT){
+            // print current candidates as is
+            if (!pf_topP.empty()) {
+                std::cout << "  >Aft: Candi: ";
+                for (auto& p : pf_topP) {
+                    std::cout << get<0>(p) << ":" << get<1>(p) << ":" << get<2>(p) << ", ";
+                }
+                std::cout << std::endl;
+            }
+        }
+
+    // Phase 7. REMOVE Orphaned ENTRIES (fix for artifact approach - dirivitive chains)
+        // THOUGHT: Although artifact is fixed, pattern still preserved by future IP entry (chain shift) 
+        vector<tuple<int64_t, int64_t, int>> clean_candidates;
+        int64_t expected_depth = 1;
+        for (auto& p : pf_topP) {
+            if (get<1>(p) == expected_depth) {
+                clean_candidates.push_back(p);
+                expected_depth++;
+            } else if (get<1>(p) == 1) {
+                // Start NEW chain 
+                clean_candidates.push_back(p);  
+                expected_depth = 2;
+            }
+        }
+        pf_topP = std::move(clean_candidates);
+        if (DBG_PF_DEPTH_PROCESSING_PRINT){
+            // print current candidates as is
+            if (!pf_topP.empty()) {
+                std::cout << "   >Aft: Orphan_Clr: ";
+                for (auto& p : pf_topP) {
+                    std::cout << get<0>(p) << ":" << get<1>(p) << ":" << get<2>(p) << ", ";
+                }
+                std::cout << std::endl;
+            }
+        }
+    // Phase 8. FLATTEN DEPTH VALS ranked by chain
+        int64_t to_flattenByCompensator = -INT64_MAX; // store cumultive offset all depth from 1->N-1 where N is current depth
+        int lastDepth = 0;
+        bool flattening_error = false;
+        int forEachIndexTracker = 0;
+        for (auto& p : pf_topP) { // for each candidate (AUTO if empty)
+            if (get<1>(p) == 1) {  // interleaved depth may have dup OOO depth entries
+                to_flattenByCompensator = get<0>(p); // reset compensator val
+                lastDepth = 1;
+            } else {
+                // MUST NOT OCCUR BECAUSE CLEANING PHASE VOIDS if depth1 missing
+                if (to_flattenByCompensator == -INT64_MAX) { // not possible? (dep1 evict before dep2?)
+                    // throw std::runtime_error("***Error*** Line: " + std::to_string(__LINE__) + " Depth 1 entry missing before depth " + std::to_string(get<1>(p)) + " during flattening.");
+                    flattening_error = true; // to see output before error
+                }
+                get<0>(p) += to_flattenByCompensator;
+                to_flattenByCompensator = get<0>(p);
+                lastDepth = get<1>(p);
+            }
+            get<1>(p) *= 100;    // INDICATION FLAG ONLY, NO PURPOSE
+            forEachIndexTracker++;
+        }
+        if (DBG_PF_DEPTH_PROCESSING_PRINT){
+            // print current candidates as is
+            if (!pf_topP.empty()) {
+                std::cout << "   >Aft: Flat: ";
+                for (auto& p : pf_topP) {
+                    std::cout << get<0>(p) << ":" << get<1>(p) << ":" << get<2>(p) << ", ";
+                }
+                std::cout << std::endl;
+            }
+        }
+
+        // find index with value == 0 and erase then restard the find
+        while (true) {
+            auto it = std::find_if(pf_topP.begin(), pf_topP.end(), [](const auto& p) { return get<0>(p) == 0; });
+            if (it == pf_topP.end()) break;
+            pf_topP.erase(it);
+        }
+
+        // print
+        if (DBG_PF_DEPTH_PROCESSING_PRINT) {
+            // print current candidates as is
+            if (!pf_topP.empty()) {
+                std::cout << "    >RedundC: ";
+                for (auto& p : pf_topP) {
+                    std::cout << get<0>(p) << ":" << get<1>(p) << ":" << get<2>(p) << ", ";
+                }
+                std::cout << std::endl;
+            }
+            // find 
+            // throw std::runtime_error("***Error*** Line: " + std::to_string(__LINE__) + " Depth 1 entry missing before depth during flattening.");
+        }
+        // if any candidate value remain zero, throw an error 
+        if (std::any_of(pf_topP.begin(), pf_topP.end(), [](const auto& p) { return get<0>(p) == 0; })) {
+            cout << "ERROR candidates:";
+            for (auto& p : pf_topP) {
+                    std::cout << get<0>(p) << ":" << get<1>(p) << ":" << get<2>(p) << ", ";
+            }
+            cout << endl;
+            throw std::runtime_error("***Zero Termination Error*** Line: " + std::to_string(__LINE__) + "List contains some candidates with zero.");
+        }
+
+        if (flattening_error) {
+            throw std::runtime_error("***Error*** Line: " + std::to_string(__LINE__) + " Depth 1 entry missing before depth during flattening.");
+        }
+    /*
+    ======================================
+          *** SINCE FLATTENED SHELL I COUNT SORT??? *** 
+                If depth3 is more frequent then depth2 then first Pf depth3 and then depth2
+                Likely depth3 be hit then depth2 
+    =======================================
+    */
+    // Phase 9. Add additional entries with different second values (NO predictions)
+        // for i from 2 to cfg.depth I traverse 
+        for (int i = 1; i < config_ptr->depth; i++) {
+            // if no depth1 entries then break 
+            if (!madeDepth1Entry) break;
+            if (access_data.depth_deltas.size() < i) continue; // before get_val must have populated this
+            // repeat (depth version) 
+            // depth_delta never being used yet.
+            // deltas={w,x,y,z} come from addr{a,b,c,d,e}. D=1 is last idx delta D=2 mean above single_delta is preLast idx delta thus D=2 is last idx delta
+            // delta = 1 position index
+            int firstDelta_idx = (access_data.depth_deltas.size() - config_ptr->depth);
+            // if delta=4 and deltas={w,x,y,z} firstIDX=0
+            int depth_entry = access_data.depth_deltas[firstDelta_idx + i]; // will be depth 2 3 4 5 ... 
+            pair<int64_t, int64_t> depth_train_value = make_pair(depth_entry, i+1); // +1 because i=1 and first entry done before (above)
+            
+    // Phase 10. update table (depth version)
+            // if ((abs(depth_entry) >= config_ptr->tracking_min && abs(depth_entry) <= config_ptr->tracking_max) &&
+            //     (depth_entry != -1 && depth_entry != -2 && depth_entry != -4)) {
+            if ((abs(depth_entry) >= 1 && abs(depth_entry) <= 63) &&
+                (depth_entry != -1 && depth_entry != -2 && depth_entry != -4)) {
+                int64_t newCounter = inc_count(markov_table[training_key][depth_train_value]);
+                markov_table[training_key][depth_train_value] = newCounter;
+                
+                // IFF depth 1 entry is skipped, depth 2 and may not have valid key_it. 
+                key_it = markov_table.find(training_key);
+                // val_it might not exist from depth 1
+                if (key_it != markov_table.end()) {
+                    val_it = key_it->second.find(depth_train_value);
+                }
+            }
+            
+    // Phase 11. manage LRU without predictions (depth version)
+            if (config_ptr->candidate_selection_policy == "Elbow") { 
+                markov_prefetcher_Elbow(prediction_key, key_it, val_it);           // predictions voided
+            } else if (config_ptr->candidate_selection_policy == "TopK") { 
+                markov_prefetcher_TopK(prediction_key, key_it, val_it);    // predictions voided
+            } else { 
+                throw std::runtime_error("Unknown candidate selection policy: " + config_ptr->candidate_selection_policy); 
+            }
+        }
+                if (DBG_PF_DEPTH_PROCESSING_PRINT){
+            // print current candidates as is
+            if (!pf_topP.empty()) {
+                std::cout << "    >Final Candi: ";
+                for (auto& p : pf_topP) {
+                    std::cout << get<0>(p) << ":" << get<1>(p) << ":" << get<2>(p) << ", ";
+                }
+                std::cout << std::endl;
+            }
+        }
+
+        // Update instance state which is required for 2. Key(Prev access):Value(Current access) 
+        pre_prev_access_data = prev_access_data; // store previous access data for next delta calculations
+        prev_access_data = access_data;
+
+        if (DBG_PF_FINAL_CANDIDATES_PRINT) {
+            if (!pf_topP.empty()) {
+                std::cout << "TopP: ";
+                for (const auto& p : pf_topP) {
+                    std::cout << "(" << get<0>(p) << ":" << get<1>(p) << "):" << get<2>(p) << " ";
+                }
+                std::cout << std::endl;
+            }
+        }
+        // INTERLEAVING AND CANDIDATE RETRIEVAL GIVES UNORDERED BY COUNT CANDIDATES 
+        // Sort candidates by count in descending order
+        std::sort(pf_topP.begin(), pf_topP.end(), 
+            [](const auto& a, const auto& b) {
+                return get<2>(a) > get<2>(b);  // Sort by count descending
+            });
+        if (DBG_PF_FINAL_CANDIDATES_PRINT) {
+            if (!pf_topP.empty()) {
+                std::cout << "Sort: ";
+                for (const auto& p : pf_topP) {
+                    std::cout << "(" << get<0>(p) << ":" << get<1>(p) << "):" << get<2>(p) << " ";
+                }
+                std::cout << std::endl;
+            }
+        }
+
+        return pf_topP;
+    }
+
+    // private:
+    // Hash function for pair<int64_t, int64_t> to use as key in unordered_map
+    struct PairHash {
+        size_t operator()(const pair<int64_t, int64_t>& p) const {
+            return ((p.first<<17) ^ p.second);
+        }
+    };
+    
+    unordered_map<int64_t, unordered_map<pair<int64_t, int64_t>, int, PairHash>> markov_table;
+    
+    // is used to store first part of stride, second part is access it self. 
+    // 1. the key must match the key of markov_table. 2. IP_Stride pf only when it is the repeating stride and is tripple repeating IP.
+    // First IPx, make entry, Second IPx, calc stride, Third IPx, if same stride then prefetch otherwise, update.  
+    unordered_map<int64_t, uint64_t> key_prev_block; 
+    unordered_map<int64_t, int64_t> key_prev_stride;
+    int curr_depth_entry = 1;
+
+    using IteratorType = unordered_map<int64_t, unordered_map<pair<int64_t, int64_t>, int, PairHash>>::iterator;
+    vector<unordered_map<pair<int64_t, int64_t>, int, PairHash>::iterator> markov_LRU;
+    int markov_LRU_front;
+    uint64_t pf_addr;
+    
+    MT_Config* config_ptr;
+    int MT_limit;
+    
+    int64_t inc_count(int64_t entry_count) {
+        entry_count++;
+        if (entry_count >= (1ULL << config_ptr->COUNT_BITS)) {
+            if (config_ptr->counter_policy == "CAP") {
+                entry_count = (1ULL << config_ptr->COUNT_BITS) - 1;
+            }
+        }
+        if (entry_count >= (1ULL << config_ptr->COUNT_BITS) && (config_ptr->counter_policy == "CAP")) {
+            throw std::runtime_error("IDMM Counter overflow at line " + std::to_string(__LINE__));
+        }
+        return entry_count;
+    }
+
+    // Iterator-based LRU eviction: returns iterator to least recently used VALUE
+    unordered_map<pair<int64_t, int64_t>, int, PairHash>::iterator markov_evict_lru() {                          // evict the least recently used value
+        if (markov_LRU.empty()) return markov_table.begin()->second.end();              // if LRU is empty, return end iterator
+        unordered_map<pair<int64_t, int64_t>, int, PairHash>::iterator val_it = markov_LRU[0];                   // get the least recently used value's iterator
+        for (int i = 1; i < markov_LRU_front && i < (int)markov_LRU.size(); i++) {      // shift the LRU
+            markov_LRU[i - 1] = markov_LRU[i];      
+        }
+        return val_it;                                                                  // Return victim iterator for table deletion (Specifically )
+    }
+
+    // move the value to the front of the LRU       
+    void markov_update_lru(int index) {
+        if (index >= markov_LRU.size() || markov_LRU_front <= 0) return;                        // if index is out of bounds or LRU is empty, return
+        auto tmpVal = markov_LRU[index];                                                        // store the value to be moved
+        for (int i = index; i < markov_LRU_front - 1 && i < (int)markov_LRU.size() - 1; i++) {  // shift the LRU
+            markov_LRU[i] = markov_LRU[i + 1];                                                  
+        }
+        if (markov_LRU_front > 0) {                                                             // if LRU has active elements, place at MRU position                        
+            markov_LRU[markov_LRU_front - 1] = tmpVal;
+        }
+    }
+    
+    // CHANGED: Return tuples instead of pairs to include count
+    vector<tuple<int64_t, int64_t, int>> markov_prefetcher_Elbow(int64_t lookup_key, IteratorType key_it, unordered_map<pair<int64_t, int64_t>, int, PairHash>::iterator val_it) {
+        vector<tuple<int64_t, int64_t, int>> top_predictions; // init Pf collector // CHANGED: Now tuples
+
+        auto it = markov_table.find(lookup_key);                                            // find the key in the table
+        if (it != markov_table.end()) {                                                     // if key is found
+            auto &next_blocks = it->second;    
+            vector<pair<pair<int64_t, int64_t>, int>> predictions(next_blocks.begin(), next_blocks.end()); // convert {Search Key: Value : Count} into vector with [Value:Count] for a given key
+            sort(predictions.begin(), predictions.end(),                                    // sort the vector by count 
+                      [](pair<pair<int64_t, int64_t>, int> &a, pair<pair<int64_t, int64_t>, int> &b) {
+                          return a.second > b.second;
+                      });
+            int total_count = accumulate(predictions.begin(), predictions.end(), 0,         // sum the count of all predictions and use for confidence
+                [](int sum, pair<pair<int64_t, int64_t>, int>& p) {
+                    return sum + p.second;
+                });
+            
+            if (predictions.size() <= 2) {                                                  // Not enough points for curvature analysis - take all
+                for (auto &prediction : predictions) {
+                    top_predictions.push_back(make_tuple(prediction.first.first, prediction.first.second, prediction.second));  // CHANGED: Return full tuple with count
+                }
+            } else {                                                                        // Use elbow method for candidate selection
+                vector<double> probs;                                                       // Calculate probabilities for curvature analysis
+                for (auto& p : predictions) {
+                    probs.push_back((double)p.second / total_count);
+                }
+                
+                vector<double> second_deriv;                                                // Calculate second derivatives (curvature)
+                for (int i = 1; i < probs.size() - 1; i++) {
+                    second_deriv.push_back(probs[i-1] - 2*probs[i] + probs[i+1]);
+                }
+                
+                int elbow_idx = max_element(second_deriv.begin(), second_deriv.end())       // Find maximum curvature point (elbow)
+                                - second_deriv.begin() + 1;
+                
+                int select_count = max(1, elbow_idx + 1);                                   // Select candidates up to elbow point (at least top-1)
+                for (int i = 0; i < select_count && i < predictions.size(); i++) {         // add predictions to Pf collector based on elbow detection
+                    top_predictions.push_back(make_tuple(predictions[i].first.first, predictions[i].first.second, predictions[i].second));  // CHANGED: Return full tuple with count
+                }
+            }
+        }
+        
+        auto lru_it = find(markov_LRU.begin(), markov_LRU.begin() + min(markov_LRU_front, (int)markov_LRU.size()), val_it); // update LRU 
+        if (lru_it != markov_LRU.begin() + min(markov_LRU_front, (int)markov_LRU.size())) {                                 // if key is found in LRU
+            int index = static_cast<int>(lru_it - markov_LRU.begin());
+            markov_update_lru(index);
+        } else {                                                                                                            // if key is NOT found in LRU
+            if (markov_LRU_front < MT_limit - 1) {                                                                          // if LRU is not full
+                if ((int)markov_LRU.size() <= markov_LRU_front) {                                                           // if LRU is smaller than LRU front
+                    markov_LRU.resize(markov_LRU_front + 1);
+                }
+                markov_LRU[markov_LRU_front] = val_it;
+                markov_LRU_front++;
+            } else {                                                                                                        // if LRU is full we evict the LRU and shift the rest
+                auto toDel = markov_evict_lru();                                                                            // LRU made of iterators 
+                for (auto &outer_pair : markov_table) {                                                                     // find the key in the table 
+                    auto &inner_map = outer_pair.second;
+                    for (auto it_inner = inner_map.begin(); it_inner != inner_map.end();) {
+                        if (it_inner == toDel) {
+                            it_inner = inner_map.erase(it_inner);
+                            break;
+                        } else {
+                            ++it_inner;
+                        }
+                    }
+                }
+                for (auto it_outer = markov_table.begin(); it_outer != markov_table.end();) {
+                    if (it_outer->second.empty()) {
+                        key_prev_block.erase(it_outer->first); // Clean stride tracking
+                        it_outer = markov_table.erase(it_outer);
+                    } else {
+                        ++it_outer;
+                    }
+                }
+                if (markov_LRU_front > 0 && markov_LRU.size() > markov_LRU_front - 1) {
+                    markov_LRU[markov_LRU_front - 1] = val_it;
+                }
+            }
+        }
+        return top_predictions;
+    }
+
+    // CHANGED: Return tuples instead of pairs to include count
+    vector<tuple<int64_t, int64_t, int>> markov_prefetcher_TopK(int64_t lookup_key, IteratorType key_it, unordered_map<pair<int64_t, int64_t>, int, PairHash>::iterator val_it) {
+        vector<tuple<int64_t, int64_t, int>> top_predictions; // init Pf collector // CHANGED: Now tuples
+
+        auto it = markov_table.find(lookup_key);                                            // find the key in the table
+        if (it != markov_table.end()) {                                                     // if key is found
+            auto &next_blocks = it->second;    
+            vector<pair<pair<int64_t, int64_t>, int>> predictions(next_blocks.begin(), next_blocks.end()); // convert {Search Key: Value : Count} into vector with [Value:Count] for a given key
+            sort(predictions.begin(), predictions.end(),                                    // sort the vector by count 
+                      [](pair<pair<int64_t, int64_t>, int> &a, pair<pair<int64_t, int64_t>, int> &b) {
+                          return a.second > b.second;
+                      });
+            int total_count = accumulate(predictions.begin(), predictions.end(), 0,         // sum the count of all predictions and use for confidence
+                [](int sum, pair<pair<int64_t, int64_t>, int>& p) {
+                    return sum + p.second;
+                });
+            for (auto &prediction : predictions) {                                          // add predictions to Pf collector if confidence is above threshold (i.e. given Pf occured >Threshold% of the time)
+                if ((static_cast<double>(prediction.second) * 100 / total_count) >= config_ptr->percent_threshold) {    
+                    top_predictions.push_back(make_tuple(prediction.first.first, prediction.first.second, prediction.second));  // CHANGED: Return full tuple with count
+                } else {
+                    break;
+                }
+            }
+        }
+        
+        auto lru_it = find(markov_LRU.begin(), markov_LRU.begin() + min(markov_LRU_front, (int)markov_LRU.size()), val_it); // update LRU 
+        if (lru_it != markov_LRU.begin() + min(markov_LRU_front, (int)markov_LRU.size())) {                                 // if key is found in LRU
+            int index = static_cast<int>(lru_it - markov_LRU.begin());
+            markov_update_lru(index);
+        } else {                                                                                                            // if key is NOT found in LRU
+            if (markov_LRU_front < MT_limit - 1) {                                                                          // if LRU is not full
+                if ((int)markov_LRU.size() <= markov_LRU_front) {                                                           // if LRU is smaller than LRU front
+                    markov_LRU.resize(markov_LRU_front + 1);
+                }
+                markov_LRU[markov_LRU_front] = val_it;
+                markov_LRU_front++;
+            } else {                                                                                                        // if LRU is full we evict the LRU and shift the rest
+                auto toDel = markov_evict_lru();                                                                            // LRU made of iterators 
+                for (auto &outer_pair : markov_table) {                                                                     // find the key in the table 
+                    auto &inner_map = outer_pair.second;
+                    for (auto it_inner = inner_map.begin(); it_inner != inner_map.end();) {
+                        if (it_inner == toDel) {
+                            it_inner = inner_map.erase(it_inner);
+                            break;
+                        } else {
+                            ++it_inner;
+                        }
+                    }
+                }
+                for (auto it_outer = markov_table.begin(); it_outer != markov_table.end();) {
+                    if (it_outer->second.empty()) {
+                        key_prev_block.erase(it_outer->first); // Clean stride tracking
+                        it_outer = markov_table.erase(it_outer);
+                    } else {
+                        ++it_outer;
+                    }
+                }
+                if (markov_LRU_front > 0 && markov_LRU.size() > markov_LRU_front - 1) {
+                    markov_LRU[markov_LRU_front - 1] = val_it;
+                }
+            }
+        }
+        return top_predictions;
+    }    
+};
+
+// CHANGED: Array-based global instances
+// Index 0: IP Stride, Index 1-8: MT prefetchers
+IDMM markov_prefetchers[NUM_MT_PREFETCHERS + 1];
+void print_configs(int cpu, MT_Config mt_configs[], int count) {
+    for (int i = 0; i < count; i++) {
+        cout << cpu << ": mt_CFG[" << i << "]:" << endl;
+        cout << "  CFG: lru_size: " << mt_configs[i].lru_size ;
+        cout << "  Δmax: " << mt_configs[i].tracking_max ;
+        cout << "  Δmin: " << mt_configs[i].tracking_min ;
+        cout << "  %_TopK: " << mt_configs[i].percent_threshold << endl ;
+        cout << "  CFG: PF_id: " << mt_configs[i].prefetcher_id << " COUNT_BITS: " << mt_configs[i].COUNT_BITS << " Policy: " << mt_configs[i].counter_policy ;
+        cout << "  key: " << mt_configs[i].tracking_key ;
+        cout << "  value: " << mt_configs[i].tracking_value ;
+        cout << "  depth: " << mt_configs[i].depth << endl;
+        cout << "  CFG: candi_select_policy: " << mt_configs[i].candidate_selection_policy ;
+        cout << "  IP_BITS: " << mt_configs[i].IP_BITS ;
+        cout << "  IP_MOD_BOUND: " << mt_configs[i].IP_MODULO_BOUND ;
+        cout << endl;
+    }
+}
+void CACHE::l2c_prefetcher_initialize() {
+    // IP Stride configuration (index 0)
+    mt_configs[0].lru_size=256; 
+    mt_configs[0].tracking_max=63; 
+    mt_configs[0].tracking_min=1; 
+    mt_configs[0].percent_threshold=5; 
+    mt_configs[0].prefetcher_id=0;
+    mt_configs[0].tracking_key="ip"; 
+    mt_configs[0].tracking_value="stride_block";
+    mt_configs[0].IP_BITS = 20; 
+    mt_configs[0].IP_MODULO_BOUND = 2048;  
+    mt_configs[0].candidate_selection_policy = "TopK";
+
+    // MT1-MT4 configurations (indices 1-4)
+    int lru_sizes[] =           {64*2               , 128*2                 , 320*2             ,  512*2};
+    int tracking_maxs[] =       {63                 , 32                    , 16                , 8};
+    int tracking_mins[] =       {32                 , 16                    , 8                 , 1};
+    int percent_thresholds[] =  {40                 , 30                    , 25                , 20};
+    string tracking_keys[] =    {"depth_ip"        , "depth_ip"            , "depth_ip"        , "depth_ip"};
+    string tracking_values[] =  {"depth_delta_block", "depth_delta_block"  , "depth_delta_block", "depth_delta_block"};
+    int IP_BITS[] =             {20                 , 20                    , 20                 , 20};
+    int COUNT_BITS[] =          {16                 , 16                    , 16                 , 16};
+    int IP_MODULO_BOUND[] =     {2048               , 2048                  , 2048               , 2048};
+    int DEPTH[] =               {4                  , 4                      , 4                  , 4};
+    string candi_sele_pol[] = {"Elbow"            , "Elbow"               , "Elbow"           , "Elbow"};
+
+
+    for (int i = 1; i <= sizeof(lru_sizes) / sizeof(lru_sizes[0]); i++) {
+        mt_configs[i].lru_size = lru_sizes[i-1];
+        mt_configs[i].tracking_max = tracking_maxs[i-1];
+        mt_configs[i].tracking_min = tracking_mins[i-1];
+        mt_configs[i].percent_threshold = percent_thresholds[i-1];
+        mt_configs[i].prefetcher_id = i;
+        mt_configs[i].tracking_key = tracking_keys[i-1];
+        mt_configs[i].tracking_value = tracking_values[i-1];
+        mt_configs[i].depth = DEPTH[i-1];
+        mt_configs[i].IP_BITS = IP_BITS[i-1];
+        mt_configs[i].COUNT_BITS = COUNT_BITS[i-1];
+        mt_configs[i].IP_MODULO_BOUND = IP_MODULO_BOUND[i-1];
+        mt_configs[i].candidate_selection_policy = candi_sele_pol[i-1];
+
+    }
+    
+    // Set configs for all prefetchers
+    for (int i = 0; i <= NUM_MT_PREFETCHERS; i++) {
+        if (i <= NUM_MT_PREFETCHERS) {  // Only initialize used prefetchers
+            markov_prefetchers[i].set_config(&mt_configs[i]);
+        }
+    }
+    print_configs(cpu, mt_configs, sizeof(mt_configs) / sizeof(mt_configs[0]));
+    
+    // Print configuration info
+    for (int i = 1; i <= 4; i++) {
+        cout << "MT" << i << ": Size: " << mt_configs[i].lru_size 
+             << " TMAX: " << mt_configs[i].tracking_max 
+             << " TMIN: " << mt_configs[i].tracking_min 
+             << " MT" << i << "PTHRESH: " << mt_configs[i].percent_threshold << endl;
+    }
+
+    cout << "CPU " << cpu << " L2C prefetcher" << endl;
+    
+
+
+    for (int i = 1; i <= 8; i++) {
+        prefetcher_count[i] = 0;
+        isPfActive[i] = true;
+    }
+    
+    cout << "now  : DUMMY FLAG V11" << endl;
+}
+
+#include <vector>
+#include <stdexcept>
+#include <cstdint>
+#include <algorithm>
+#include <vector>
+#include <stdexcept>
+#include <iostream>
+#include <algorithm>
+#include <vector>
+#include <stdexcept>
+#include <iostream>
+#include <cmath>
+
+struct track_module_hits {
+    uint64_t ip;
+    // static constexpr uint8_t PAGE_BITS = 16;
+    // static constexpr uint8_t BLOCK_BITS = 6;
+    // static constexpr uint16_t PF_HISTORY_SIZE = 128;
+    // static constexpr uint8_t PF_HIT_BITS = 16;
+    // static constexpr uint8_t WINDOW_SIZE = 16;   
+    // static constexpr uint8_t NUM_ACCESSES_PER_WINDOW = 31;
+    // static constexpr uint8_t BIT_LEN = 5;
+    // static constexpr uint8_t MAX_INT_PACKED_LIMIT = (1 << BIT_LEN) - 1;
+    
+    
+    static constexpr uint32_t PAGE_BITS = 16;
+    static constexpr uint32_t BLOCK_BITS = 6;
+    static constexpr uint16_t PF_HISTORY_SIZE = 128;
+    // static constexpr uint32_t PF_HIT_BITS = 16;
+    static constexpr uint32_t WINDOW_SIZE = 2;   
+    static constexpr uint32_t NUM_ACCESSES_PER_WINDOW = 32  -1;
+    #if NUM_ACCESSES_PER_WINDOW >= 2
+        static constexpr uint32_t BIT_LEN = 2;        // 2^3 = 8
+    #elif NUM_ACCESSES_PER_WINDOW >= 4
+        static constexpr uint32_t BIT_LEN = 3;        // 2^3 = 8
+    #elif NUM_ACCESSES_PER_WINDOW >= 8  
+        static constexpr uint32_t BIT_LEN = 4;        // 2^4 = 16
+    #elif NUM_ACCESSES_PER_WINDOW >= 16
+        static constexpr uint32_t BIT_LEN = 5;        // 2^5 = 32
+    #elif NUM_ACCESSES_PER_WINDOW >= 32
+        static constexpr uint32_t BIT_LEN = 6;        // 2^6 = 64
+    #elif NUM_ACCESSES_PER_WINDOW >= 64
+        static constexpr uint32_t BIT_LEN = 7;        // 2^7 = 128
+    #elif NUM_ACCESSES_PER_WINDOW >= 128
+        static constexpr uint32_t BIT_LEN = 8;        // 2^8 = 256
+    #elif NUM_ACCESSES_PER_WINDOW >= 256
+        static constexpr uint32_t BIT_LEN = 9;        // 2^9 = 512
+    #elif NUM_ACCESSES_PER_WINDOW >= 512
+        static constexpr uint32_t BIT_LEN = 10;       // 2^10 = 1024
+    #elif NUM_ACCESSES_PER_WINDOW >= 1024
+        static constexpr uint32_t BIT_LEN = 11;       // 2^11 = 2048
+    #elif NUM_ACCESSES_PER_WINDOW >= 2048
+        static constexpr uint32_t BIT_LEN = 12;       // 2^12 = 4096
+    #else
+        static constexpr uint32_t BIT_LEN = 13;       // Fallback for larger values
+    #endif
+    static constexpr uint32_t MAX_INT_PACKED_LIMIT = (1 << BIT_LEN);
+    
+    double global_tracker_stat = 0;
+    double global_tracker_activated = 0;
+    std::vector<uint32_t> level_thresholds;
+    
+    uint32_t pf_issue_history[PF_HISTORY_SIZE];
+    uint16_t pf_write_ptr = 0;
+    uint32_t current_hit_count = 0;
+    uint32_t access_counter = 0;
+    uint32_t window_history[WINDOW_SIZE] = {0};
+    uint32_t window_hit_counts[WINDOW_SIZE] = {0};
+    uint32_t window_ptr = 0;
+    bool module_active[PF_HISTORY_SIZE] = {true};
+
+    track_module_hits() {
+        level_thresholds = {0,1,2,4,8,10};
+    }
+        
+    void set_effectiveness_levels(const std::vector<uint32_t>& thresholds) {
+        if (thresholds.empty()) {
+            throw std::invalid_argument("Level thresholds cannot be empty");
+        }
+        
+        level_thresholds = thresholds;
+        
+        for (size_t i = 1; i < level_thresholds.size(); i++) {
+            if (level_thresholds[i] <= level_thresholds[i-1]) {
+                throw std::invalid_argument("Level thresholds must be in ascending order");
+            }
+        }
+        
+        if (level_thresholds.back() > NUM_ACCESSES_PER_WINDOW) {
+            throw std::invalid_argument("Maximum threshold exceeds window size");
+        }
+    }
+
+    bool get_pf_state(int MSHR_SIZE, int MSHR_occupancy) {
+        uint32_t current_hits = current_hit_count;
+        uint32_t available_mshr = MSHR_SIZE - MSHR_occupancy;
+        
+        uint32_t required_level = 0;
+        
+        if (available_mshr <= MSHR_SIZE/8) {
+            required_level = 3;
+        } else if (available_mshr <= MSHR_SIZE/4) {
+            required_level = 2;
+        } else if (available_mshr <= MSHR_SIZE/2) {
+            required_level = 1;
+        } else if (available_mshr <= (MSHR_SIZE*3)/4) {
+            required_level = 0;
+        } else if (available_mshr <= MSHR_SIZE*0.875) {
+            required_level = 0;
+        }
+        
+        if (required_level >= level_thresholds.size()) {
+            required_level = level_thresholds.size() - 1;
+        }
+        
+        uint32_t required_hit_count = level_thresholds[required_level];
+        
+        return current_hits >= required_hit_count;
+    }
+    
+    void shadow_hit_promotion(uint32_t encoded_access_block, bool hit) {
+        if (hit) {
+            for (uint16_t i = 0; i < PF_HISTORY_SIZE; i++) {
+                if (pf_issue_history[i] == encoded_access_block) {
+                    if (window_history[window_ptr] == 0 && !level_thresholds.empty()) {
+                        window_history[window_ptr] = 1;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    void operate(uint64_t ip, uint64_t block, bool hit, const std::vector<uint64_t>& issue_vector) {
+        uint32_t encodedAccessBlock = encode_block(block);
+        shadow_hit_promotion(encodedAccessBlock, hit);
+        
+        if (hit) {
+            for (uint16_t i = 0; i < PF_HISTORY_SIZE; i++) {
+                if (pf_issue_history[i] == encodedAccessBlock) {
+                    current_hit_count++;
+                    break;
+                }
+            }
+            
+            if (current_hit_count > MAX_INT_PACKED_LIMIT) {
+                throw std::runtime_error("[Pf ERROR] Accuracy bit packing overflow at line " + 
+                                       std::to_string(__LINE__));
+            }
+        }
+        
+        
+        addNewIssues(issue_vector);
+        access_counter++;
+        get_currWindowStat(); // before shift, but after count++ from shadow hit
+
+        if (access_counter >= NUM_ACCESSES_PER_WINDOW) {
+            uint32_t effectiveness = level_thresholds.size();
+            for (size_t i = 0; i < level_thresholds.size(); i++) {
+                if (current_hit_count <= level_thresholds[i]) {
+                    effectiveness = i;
+                    break;
+                }
+            }
+            
+            setWindowMask(effectiveness);
+            window_hit_counts[window_ptr] = current_hit_count;
+            shiftWindow();
+        }
+    }
+    
+    void addNewIssues(const std::vector<uint64_t>& issue_vector) {
+        for (uint64_t block : issue_vector) {
+            uint32_t encoded = encode_block(block);
+            FIFO(encoded);
+        }
+    }
+    
+    uint32_t encode_block(uint64_t block) {
+        uint64_t page_number = block >> 6;
+        
+        static constexpr uint64_t fibonacci_multiplier = 11400714819323198486ULL;
+        // uint64_t hash_result = page_number * fibonacci_multiplier;
+        uint64_t hash_result = page_number ^ ip ;
+        // uint64_t page_hash = (hash_result >> (64-PAGE_BITS));
+        uint64_t page_hash = hash_result & ((1ULL << PAGE_BITS) - 1);
+        if (DGB_PF_HASH_ENCODE_PRINT){
+            cout << "Page#: " << page_number << ", Block#: " << block << ", Hash: " << hash_result << "PgHash: " << page_hash << endl;
+        }
+        uint64_t max_page_value = (1ULL << PAGE_BITS) - 1;
+        
+        if (page_hash > max_page_value) {
+            throw std::runtime_error("Page hash exceeds PAGE_BITS limit at line " + std::to_string(__LINE__));
+        }
+        
+        uint64_t page_start = page_number << LOG2_BLOCK_SIZE;
+        uint64_t block_offset = block - page_start;
+        
+        uint32_t combined = (page_hash << BLOCK_BITS) | block_offset;
+        constexpr uint32_t MAX_COMBINED = (1u << (PAGE_BITS + BLOCK_BITS)) - 1;
+        
+        if (__builtin_expect(combined > MAX_COMBINED, 0)) {
+            throw std::overflow_error("Combined hash exceeds allocated bits");
+        }
+        
+        return combined;
+    }
+    
+    void FIFO(uint32_t encoded_block) {
+        pf_issue_history[pf_write_ptr] = encoded_block;
+        pf_write_ptr = (pf_write_ptr + 1) % PF_HISTORY_SIZE;
+    }
+    
+    void setWindowMask(uint32_t mask_value) {
+        window_history[window_ptr] = mask_value;
+    }
+    
+    void shiftWindow() {
+        current_hit_count = 0;
+        access_counter = 0;
+        window_ptr = (window_ptr + 1) % WINDOW_SIZE;
+    }
+    
+    int get_currentMask() {
+        return current_hit_count;
+    }
+    
+    float get_avgMaskPerWindow() {
+        int total = 0;
+        for (int i = 0; i < WINDOW_SIZE; i++) {
+            total += window_hit_counts[i];
+        }
+        return total / WINDOW_SIZE;
+    }
+    
+    float get_AvgEffectivenessPercent() {
+        if (level_thresholds.empty()) return 0;
+        
+        uint32_t total_effectiveness = 0;
+        for (int i = 0; i < WINDOW_SIZE; i++) {
+            total_effectiveness += window_history[i];
+        }
+        
+        float avg_effectiveness = (float)total_effectiveness / (WINDOW_SIZE);
+        return avg_effectiveness;
+    }
+    
+    float get_TotalHitRate() {
+        uint32_t total_hits = 0;
+        uint32_t total_windows = 0;
+        
+        for (int i = 0; i < WINDOW_SIZE; i++) {
+            total_hits += window_hit_counts[i];
+            total_windows++;
+        }
+        
+        if (total_windows == 0) return 0.0f;
+        
+        uint32_t total_accesses = total_windows * NUM_ACCESSES_PER_WINDOW;
+        
+        return (float)total_hits / total_accesses;
+    }
+    
+    const std::vector<uint32_t>& get_level_thresholds() const {
+        return level_thresholds;
+    }
+    
+    std::vector<int> get_effectiveness_distribution() const {
+        std::vector<int> distribution(level_thresholds.size() + 1, 0);
+        for (int i = 0; i < WINDOW_SIZE; i++) {
+            uint32_t eff = window_history[i];
+            if (eff < distribution.size()) {
+                distribution[eff]++;
+            }
+        }
+        return distribution;
+    }
+    
+    void debug_current_window() const {
+        std::cout << "Window " << (int)window_ptr 
+                  << ": access_counter=" << (int)access_counter
+                  << ", current_hit_count=" << (int)current_hit_count
+                  << ", effectiveness=" << (int)window_history[window_ptr]
+                  << ", stored_hits=" << (int)window_hit_counts[window_ptr] << std::endl;
+    }
+    
+    void print_window_stats() const {
+        std::cout << "Window Stats - Effectiveness/Hits: ";
+        for (int i = 0; i < WINDOW_SIZE; i++) {
+            std::cout << "[" << (int)window_history[i] << "/" << (int)window_hit_counts[i] << "] ";
+        }
+        std::cout << std::endl;
+    }
+    double get_currWindowStat() {
+        global_tracker_stat += (double)current_hit_count / (double)access_counter;
+        global_tracker_activated += 1;
+        return global_tracker_stat/global_tracker_activated;
+    }
+};
+
+track_module_hits pf_module_trackers[32];
+double tracker_avg_tracker[32] = {0};
+int moduleActiveRatio[32] = {0};
+int tracker_i = 0;
+bool module_hit = false;
+#include <tuple>
+uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint32_t metadata_in) {
+    // Cache hit tracking - EXACT as original
+    if (cache_hit) {
+        for (auto it = currentRound_prefetches.begin(); it != currentRound_prefetches.end(); ++it) {
+            if (it->first == (addr >> LOG2_BLOCK_SIZE << LOG2_BLOCK_SIZE)) {
+                nxtH_cnt[it->second]++;
+            }
+        }
+        tH_cnt++;
+    }
+    currentRound_prefetches.clear();
+
+    // Cache initialization - EXACT as original
+    if(NUM_CACHELINES == 0){
+        uint64_t cache_size = (L2C_SET*L2C_WAY*BLOCK_SIZE)/1024;
+        cout << "CPU " << cpu << " L2C prefetcher initialized" << endl;
+        cout << "\n\nCache Size: " << cache_size << endl;
+        cout << "number of cache lines: " << L2C_SET*L2C_WAY << endl;
+        NUM_CACHELINES = L2C_SET*L2C_WAY;
+    }
+    
+    uint64_t alignedAddr = addr >> LOG2_BLOCK_SIZE;
+    shared_access_data.init_process_access(alignedAddr, ip); 
+    uint32_t current_encoded = pf_module_trackers[0].encode_block(alignedAddr);
+
+// MARKOV IP STRIDE PREFETCHER (Index 0) - UNCHANGED ------------------------------------------------------------------------------------------------------------
+
+    // CHANGED: Now returns pairs, but for IP stride we only need the value part
+    vector<tuple<int64_t, int64_t, int>> stride_predictions = markov_prefetchers[0].operate(shared_access_data);
+    
+    module_hit = false;
+    for (int i = 0; i < pf_module_trackers[tracker_i].PF_HISTORY_SIZE; i++) {
+        if (pf_module_trackers[tracker_i].pf_issue_history[i] == current_encoded) {
+            module_hit = true;
+            break;
+        }
+    }
+    
+    vector<uint64_t> empty_vector;
+    pf_module_trackers[tracker_i].operate(ip, alignedAddr, module_hit, empty_vector);
+    
+    if (DGB_ALWAYS_PF || (pf_module_trackers[tracker_i].get_pf_state(MSHR.SIZE, MSHR.occupancy) && !stride_predictions.empty())) {
+        for (auto stride_pair : stride_predictions) {  // CHANGED: Now it's a pair
+            int64_t stride = get<0>(stride_pair);  // CHANGED: Extract the value part
+            if (stride == 0) continue;
+            
+            int prefetchDegree;
+            if (MSHR.occupancy < (1*MSHR.SIZE)/8)
+                prefetchDegree = PREFETCH_DEGREE;
+            else if (MSHR.occupancy < (1*MSHR.SIZE)/5)
+                prefetchDegree = PREFETCH_DEGREE/2;
+            else if (MSHR.occupancy < (1*MSHR.SIZE)/2)
+                prefetchDegree = PREFETCH_DEGREE/5;
+            else 
+                prefetchDegree = PREFETCH_DEGREE/4;
+
+            if (pf_module_trackers[tracker_i].get_TotalHitRate()>0.6){
+                prefetchDegree +=4;
+            }
+
+            flagged = 0;
+            for (int i=0; i<prefetchDegree; i++) {
+                if (flagged == 0){
+                    pf_guess_cnt[IPSTR_ID]++;
+                    flagged = 1;
+                }
+
+                uint64_t pf_addr = (alignedAddr + (stride*(i+1))) << LOG2_BLOCK_SIZE;
+                uint64_t pf_block = alignedAddr + (stride*(i+1));
+                metadata_in = 1; 
+                
+                if (MSHR.occupancy < ((MSHR.SIZE/4)*3) || pf_nxtH_acc[IPSTR_ID] > 0.01){
+                    prefetch_line(ip, addr, pf_addr, FILL_L2, metadata_in);
+                    uint32_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                    pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                }
+                else{
+                    prefetch_line(ip, addr, pf_addr, FILL_LLC, metadata_in);
+                    uint32_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                    pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                }
+                metadata_in = 0;
+                currentRound_prefetches.push_back(make_pair(pf_addr, IPSTR_ID));
+                prefetcher_count[2]++;
+            }
+        }
+    }
+    
+    tracker_avg_tracker[tracker_i] += pf_module_trackers[tracker_i].get_TotalHitRate();
+    moduleActiveRatio[tracker_i] += pf_module_trackers[tracker_i].get_pf_state(MSHR.SIZE, MSHR.occupancy);
+    if (DBG_PF_TRACKER_PRINT && cnt % TRACKER_STATS_PRINT_PERIOD == 0){
+        cout << "MODULE TRACKER: " << setw(4) << tracker_i 
+            << " WINDOW HIT RATE: " << setw(8) << fixed << setprecision(4) 
+            << tracker_avg_tracker[tracker_i]/TRACKER_STATS_PRINT_PERIOD << " STATE: "<< setw(10) << pf_module_trackers[tracker_i].get_avgMaskPerWindow() << " ActiveRatio: " << fixed << setprecision(4) << (double)moduleActiveRatio[tracker_i]/TRACKER_STATS_PRINT_PERIOD << endl;
+        tracker_avg_tracker[tracker_i] = 0; 
+        moduleActiveRatio[tracker_i] = 0;
+    }
+    tracker_i++;
+
+// IDMM: MT MODULES (Indices 1-4) - REFACTORED LOOP WITH PAIR SUPPORT ------------------------------------------------------------
+    // CHANGED: Loop through MT prefetchers - now handling pairs
+    for (int mt_idx = 1; mt_idx <= NUM_MT_PREFETCHERS; mt_idx++) {
+        pf_cnt = 0;
+        // CHANGED: Now returns pairs instead of just values
+        vector<tuple<int64_t, int64_t, int>> markov_predictions = markov_prefetchers[mt_idx].operate(shared_access_data);
+        
+        // cout << "MT PREFETCHER " << mt_idx << " PREDICTIONS: ";
+        // for (auto pred_pair : markov_predictions) {  // CHANGED: Now it's pairs
+        //     cout << "(" << pred_pair.first << "," << pred_pair.second << ") ";  // CHANGED: Print both value and depth
+        // }
+        // cout << endl;
+
+        // if DBG
+        if (DBG_PFing_CANDIDATES_PRINT) {
+            cout << "TABLE: " << mt_idx; 
+            int newLiner = 0;
+            for (auto &outer_pair : markov_prefetchers[mt_idx].markov_table) {
+                for (auto &inner_pair : outer_pair.second) {
+                    // for every 8 values new line 
+                    if (newLiner % 8 == 0) cout << endl;
+                    string coutLn = "Δ:" + to_string(inner_pair.first.first) + " D:" + to_string(inner_pair.first.second) + " C:" + to_string(inner_pair.second) + "";
+                    cout << setw(10) << coutLn;
+                    newLiner++;
+                }
+            }
+            cout << endl;
+        }
+
+        module_hit = false;
+        for (int i = 0; i < pf_module_trackers[tracker_i].PF_HISTORY_SIZE; i++) {
+            if (pf_module_trackers[tracker_i].pf_issue_history[i] == current_encoded) {
+                module_hit = true;
+                break;
+            }
+        }
+        pf_module_trackers[tracker_i].operate(ip, alignedAddr, module_hit, empty_vector);
+        
+        if (DGB_ALWAYS_PF || (pf_module_trackers[tracker_i].get_pf_state(MSHR.SIZE, MSHR.occupancy) && !markov_predictions.empty())) {
+            flagged = 0;
+
+        
+            for (auto offset_pair : markov_predictions) {  // CHANGED: Now it's pairs
+                int64_t offset = get<0>(offset_pair);  // delta
+                int64_t depth = get<1>(offset_pair);  // depth
+                int count = get<2>(offset_pair);
+                // NEW: You can now use depth information for decision making
+                // For example, you might want to treat different depths differently:
+                // if (depth > 4) continue;  // Skip deep predictions
+                // Or adjust prefetch degree based on depth
+                
+                if (flagged == 0){
+                    pf_guess_cnt[mt_configs[mt_idx].prefetcher_id]++;
+                    flagged = 1;
+                }
+                
+                if (MSHR.occupancy < (MSHR.SIZE/2)){    
+                    if (isPfActive[mt_configs[mt_idx].prefetcher_id]==true){
+                        for (int i = 1; i <= MT_DEGREE; i++){
+                            
+                            prefetcher_count[2 + mt_idx]++;  // prefetcher_count[3] for MT1, [4] for MT2, etc.
+                            currentRound_prefetches.push_back(make_pair(pf_addr, mt_configs[mt_idx].prefetcher_id));
+                            pf_cnt++;
+
+                            pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+                            uint64_t pf_block = alignedAddr - (offset*i);
+                            if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+                                if (PQ.occupancy < PQ.SIZE){
+                                    prefetch_line(ip, addr, (pf_addr), FILL_L2, metadata_in);
+                                    uint32_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                                    pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                                }
+                                else{
+                                    prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+                                    uint32_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                                    pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                                }
+                            }
+                        }
+                    }
+                    currentRound_prefetches.push_back(make_pair(pf_addr, mt_configs[mt_idx].prefetcher_id));
+                }
+                else{
+                    if (isPfActive[mt_configs[mt_idx].prefetcher_id]==true){
+                        for (int i = 1; i <= MT_DEGREE; i++){
+                            prefetcher_count[2 + mt_idx]++;
+                            currentRound_prefetches.push_back(make_pair(pf_addr, mt_configs[mt_idx].prefetcher_id));
+                            pf_cnt++;
+                            
+                            pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+                            uint64_t pf_block = alignedAddr - (offset*i);
+                            if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+                                prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+                                uint32_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                                pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                            }
+                        }
+                    }
+                }  
+            }
+        }
+        
+        tracker_avg_tracker[tracker_i] += pf_module_trackers[tracker_i].get_TotalHitRate();
+        moduleActiveRatio[tracker_i] += pf_module_trackers[tracker_i].get_pf_state(MSHR.SIZE, MSHR.occupancy);
+        if (DBG_PF_TRACKER_PRINT && cnt % TRACKER_STATS_PRINT_PERIOD == 0){
+            cout << "MODULE TRACKER: " << setw(4) << tracker_i 
+                 << " WINDOW HIT RATE: " << setw(8) << fixed << setprecision(4) 
+                 << tracker_avg_tracker[tracker_i]/TRACKER_STATS_PRINT_PERIOD << " STATE: "<< setw(10) << pf_module_trackers[tracker_i].get_avgMaskPerWindow() << " ActiveRatio: " << fixed << setprecision(4) << (double)moduleActiveRatio[tracker_i]/TRACKER_STATS_PRINT_PERIOD << endl;
+            tracker_avg_tracker[tracker_i] = 0; 
+            moduleActiveRatio[tracker_i] = 0;
+        }
+        tracker_i++;
+    }
+
+// END OF REFACTORED MT LOOP ------------------------------------------------------------
+
+    // Update global state - EXACT as original
+    pre_previous_addr = previous_addr;
+    preIP = ip;
+    previous_addr = addr;
+    cnt++;
+
+    // Reset tracker index for next access
+    tracker_i = 0;
+
+    return metadata_in;
+}
+
+uint32_t CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in) {
+   return metadata_in;
+}
+
+void CACHE::l2c_prefetcher_final_stats() {
+    cout << "CPU " << cpu << " L2C PC-based stride prefetcher final stats" << endl;
+    cout << "Stride Degree: " << PREFETCH_DEGREE << endl;
+    
+    for (int i = 1; i <= 4; i++) {
+        cout << "MT" << i << "  MARKOV_LRU_SIZE: " << mt_configs[i].lru_size << endl;
+        cout << "MT" << i << "  MARKOV_PREDICTION_PERCENTTHRESHOLD: " << mt_configs[i].percent_threshold << endl;
+        cout << "MT" << i << "  OUTLIERS_THRESHOLD_Max: " << mt_configs[i].tracking_max << endl;
+        cout << "MT" << i << "  OUTLIERS_THRESHOLD_Min: " << mt_configs[i].tracking_min << endl; 
+    }
+    print_configs(cpu, mt_configs, sizeof(mt_configs) / sizeof(mt_configs[0]));
+
+    cout << "IPStride Degree/Access Ratio: " << (double)prefetcher_count[2]/(double)cnt << endl;
+    cout << "MT1 IPDEltaMarkov  Degree/Access Ratio: " << (double)prefetcher_count[3]/(double)cnt << endl;
+    cout << "MT2 IPDEltaMarkov  Degree/Access Ratio: " << (double)prefetcher_count[4]/(double)cnt << endl;
+    cout << "MT3 IPDEltaMarkov  Degree/Access Ratio: " << (double)prefetcher_count[5]/(double)cnt << endl;
+    cout << "MT4 IPDEltaMarkov  Degree/Access Ratio: " << (double)prefetcher_count[6]/(double)cnt << endl;
+
+    for (int i = 0; i < 5; i++) {
+        cout << "MT" << i << "  Global Hit Rate: " << pf_module_trackers[i].get_currWindowStat() << endl;
+    }
+
+    // print track_module_hits configuration per IDMM
+    for (int i = 0; i < 5; i++) {
+        cout << "MT" << i << "  CFG: Pf_HistSize: " << pf_module_trackers[i].PF_HISTORY_SIZE << "  Win#" << pf_module_trackers[i].WINDOW_SIZE << " PerWinAccesses: " << pf_module_trackers[i].NUM_ACCESSES_PER_WINDOW << endl;
+        cout << "MT" << i << "  CFG:  PageBits: "<< pf_module_trackers[i].PAGE_BITS << " Cnt BitLen: " << pf_module_trackers[i].BIT_LEN << endl;
+        // print all threshold levels
+        for (int j = 0; j < pf_module_trackers[i].level_thresholds.size(); j++) {
+            cout << "MT" << i << "  CFG:  Threshold Level " << j << ": " << pf_module_trackers[i].level_thresholds[j] << ", ";
+        }
+        cout << endl;
+    }
+}

@@ -1,0 +1,24 @@
+// ============================================================
+// METHOD 3: PURE MISS CYCLE TARGETING
+// P1: last_class == M  (current cycle IS the pure stall [Eq18,19])
+//     -> bypass converts future M cycles to X [Eq15: kappa drops -> MST drops Eq35]
+//     -> also increases ci(next) via Eq37 -> CM(next) up -> camat(next) down [Eq27,33]
+// P2: RQ not full
+// P3: windowed w_m > w_h  (phi<0.5 [Eq13+16]: miss dominates, fill not worth doing)
+// ============================================================
+
+// --- M3 LLC ---
+inline bool llc_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (!llc_bypass_init) {
+        cout << "LLC Bypass [M3 Pure Miss Cycle Targeting]:\n"
+             << "  P1: last_class(LLC)==M  [Eq18,19]\n"
+             << "  P2: LLC RQ not full\n"
+             << "  P3: w_m(LLC) > w_h(LLC) [Eq13+16]\n";
+        llc_bypass_init = true;
+    }
+    if (lpm[cpu][LLC_type].last_class != LPM_CLASS_M) return false;
+    if (LLC->RQ.occupancy >= LLC->RQ.SIZE)             return false;
+
+    const auto& t3 = lpm[cpu][LLC_type];
+    return t3.w_m > t3.w_h;
+}

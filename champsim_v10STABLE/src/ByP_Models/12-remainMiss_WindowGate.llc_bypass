@@ -1,0 +1,33 @@
+// ============================================================
+// METHOD 5: REMAINING MISS WINDOW GATE
+// Core idea: if current miss window is nearly exhausted, a new
+// miss will land in a pure-M zone (no overlap possible) — bypass
+// is useless because the new miss ITSELF becomes a pure stall.
+// [Eq15,19]
+// ============================================================
+
+// --- M5 LLC ---
+inline bool llc_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (!llc_bypass_init) {
+        cout << "LLC Bypass [M5 Remaining Miss Window Gate]:\n"
+             << "  remaining_m proxy = (w_x/(w_m+w_x)) * MSHR.occ * camat_LLC\n"
+             << "  bypass iff remaining_m > camat_LLC AND w_x > 0\n"
+             << "  [Eq15,19: no DRAM tracker — camat_LLC as DRAM penalty proxy]\n";
+        llc_bypass_init = true;
+    }
+    if (LLC->RQ.occupancy >= LLC->RQ.SIZE) return false;
+
+    const auto& t3 = lpm[cpu][LLC_type];
+
+    double w_m = t3.w_m;
+    double w_x = t3.w_x;
+    if (w_x <= 0.0) return false;
+
+    double camat = t3.camat_activeMemCyDivAccesses_ratio;
+    if (camat <= 0.0) return false;
+
+    double overlap_frac = w_x / (w_m + w_x);
+    double remaining_m  = overlap_frac * (double)LLC->MSHR.occupancy * camat;
+
+    return remaining_m > camat;
+}

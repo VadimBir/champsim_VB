@@ -1,5 +1,5 @@
 #include "block.h"
-int PACKET_QUEUE::check_queue(PACKET *packet) {
+int PACKET_QUEUE::check_queue(PACKET *packet) const {
     // cout << "PACKET: "  << sizeof(*packet) << endl;
     
     if ((head == tail) && occupancy == 0)

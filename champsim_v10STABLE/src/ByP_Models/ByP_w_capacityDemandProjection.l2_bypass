@@ -1,0 +1,48 @@
+#include "cache.h"
+#include "lpm_tracker.h"
+
+#ifndef L1D_type
+#define L1D_type  4
+#define L2C_type  5
+#define LLC_type  6
+#endif
+
+// L2C BASE — structural mirror of original L1D model
+// available = free_LLC * camat_LLC
+// immediate = (LLC.RQ+PQ).occ * camat_LLC
+// future    = (lpmr_llc / lpmr_l2c) * camat_LLC
+// entry     = camat_LLC
+// NOTE: same available-formula question applies — see _3_derived for fixed variant
+
+static bool l2_bypass_init = false;
+
+#define SHALL_L2C_BYPASS_DEFINED
+inline bool l2c_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (l2_bypass_init == false) {
+        cout << "L2C Bypass [Base capacityDemandProjection]:\n"
+             << "  available = free_LLC * camat_LLC\n"
+             << "  immediate = (LLC.RQ+PQ).occ * camat_LLC\n"
+             << "  future    = (lpmr_llc/lpmr_l2c) * camat_LLC\n"
+             << "  entry     = camat_LLC\n";
+        l2_bypass_init = true;
+    }
+
+    if (L2C->MSHR.occupancy < L2C->MSHR.SIZE) return false;
+
+    uint32_t free = LLC->MSHR.SIZE - LLC->MSHR.occupancy;
+    if (free == 0) return false;
+
+    double camat    = lpm[cpu][LLC_type].camat_activeMemCyDivAccesses_ratio;
+    double lpmr_l2c = lpm[cpu][L2C_type].lpmr_activeMemCyDivIdealCy_ratio;
+    double lpmr_llc = lpm[cpu][LLC_type].lpmr_activeMemCyDivIdealCy_ratio;
+
+    if (lpmr_l2c < 0.001) lpmr_l2c = 0.001;
+    if (lpmr_llc < 0.001) lpmr_llc = 0.001;
+
+    double available = (double)free * camat;
+    double immediate = (double)(LLC->RQ.occupancy + LLC->PQ.occupancy) * camat;
+    double future    = (lpmr_llc / lpmr_l2c) * camat;
+    double entry     = camat;
+
+    return available > (immediate + future + entry);
+}

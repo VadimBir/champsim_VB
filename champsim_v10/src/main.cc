@@ -877,35 +877,7 @@ void signal_handler(int signal)
 	exit(1);
 }
 
-// log base 2 function from efectiu
-int lg2(int n)
-{
-    int i, m = n, c = -1;
-    for (i=0; m; i++) {
-        m /= 2;
-        c++;
-    }
-    return c;
-}
 
-uint64_t rotl64 (uint64_t n, unsigned int c)
-{
-    const unsigned int mask = (CHAR_BIT*sizeof(n)-1);
-
-    assert ( (c<=mask) &&"rotate by type width or more");
-    c &= mask;  // avoid undef behaviour with NDEBUG.  0 overhead for most types / compilers
-    return (n<<c) | (n>>( (-c)&mask ));
-}
-
-uint64_t rotr64 (uint64_t n, unsigned int c)
-{
-    const unsigned int mask = (CHAR_BIT*sizeof(n)-1);
-#ifdef main_SANITY_CHECK
-    assert ( (c<=mask) &&"rotate by type width or more");
-#endif
-    c &= mask;  // avoid undef behaviour with NDEBUG.  0 overhead for most types / compilers
-    return (n>>c) | (n<<( (-c)&mask ));
-}
 
 RANDOM champsim_rand(champsim_seed);
 uint64_t va_to_pa(uint32_t cpu, uint64_t instr_id, uint64_t va, uint64_t unique_vpage) {

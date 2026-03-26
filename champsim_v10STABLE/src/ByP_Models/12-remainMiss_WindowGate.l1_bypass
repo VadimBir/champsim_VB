@@ -1,0 +1,48 @@
+// ============================================================
+// METHOD 5: REMAINING MISS WINDOW GATE
+// Core idea: if current miss window is nearly exhausted, a new
+// miss will land in a pure-M zone (no overlap possible) — bypass
+// is useless because the new miss ITSELF becomes a pure stall.
+// Only bypass when enough miss cycles remain to absorb a new
+// overlapped miss: remaining_m > camat_next
+// [Eq15: X cycle only exists when miss can hide under existing window]
+// [Eq19: pure M = no overlap — adding miss here just extends pure stall]
+//
+// vars needed (from lpm_tracker window):
+//   w_m        : windowed pure-miss cycle count
+//   w_x        : windowed overlap cycle count
+//   miss_depth : avg outstanding miss depth (proxy for window remaining)
+//                = w_x / max(w_m+w_x, 1)  * MSHR.occupancy
+// bypass iff: estimated remaining_m > camat_next
+//             AND w_x > 0  (overlap is happening at all)
+// ============================================================
+
+// --- M5 L1D ---
+inline bool l1d_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (!l1_bypass_init) {
+        cout << "L1D Bypass [M5 Remaining Miss Window Gate]:\n"
+             << "  Only bypass if miss window has enough room for new overlapped miss\n"
+             << "  remaining_m proxy = (w_x/(w_m+w_x)) * MSHR.occ * camat_L1D\n"
+             << "  bypass iff remaining_m > camat_L2C AND w_x > 0\n"
+             << "  [Eq15,19: new miss in pure-M zone = useless bypass]\n";
+        l1_bypass_init = true;
+    }
+    if (L2C->RQ.occupancy >= L2C->RQ.SIZE) return false;
+
+    const auto& t1 = lpm[cpu][L1D_type];
+    const auto& t2 = lpm[cpu][L2C_type];
+
+    double w_m = t1.w_m;
+    double w_x = t1.w_x;
+    if (w_x <= 0.0) return false;  // no overlap happening — new miss is pure stall
+
+    double camat_next = t2.camat_activeMemCyDivAccesses_ratio;
+    if (camat_next <= 0.0) return false;
+
+    // overlap fraction of miss window * outstanding depth * camat = estimated remaining overlap
+    double overlap_frac   = w_x / (w_m + w_x);
+    double remaining_m    = overlap_frac * (double)L1D->MSHR.occupancy
+                            * t1.camat_activeMemCyDivAccesses_ratio;
+
+    return remaining_m > camat_next;
+}

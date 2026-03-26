@@ -89,7 +89,7 @@ BYPASS_L2=${BYPASS_L2:-0}
 BYPASS_LLC=${BYPASS_LLC:-0}
 
 # CORE_LIST=(16 1 2  8 4)
-CORE_LIST=(16 8 4 2 1)
+CORE_LIST=(4 2 1 16 8)
 
 TRACE_LIST=(
   "LLM256.Pythia-70M_21M"
@@ -100,100 +100,51 @@ TRACE_LIST=(
 # or
 #   "L1 L2 L3"
 PREFETCH_LIST=(
-  "next_line-1-2-4 next_line"
+  "next_line-1-2-4 no"
   "no no"
   "next_line ip_stride"
-  "next_line no"
   "no next_line"
 )
 
 LLC_PREFETCHER_DEFAULT="no"
 
 MODEL_LIST=(
-# "ByP_w_capacityDemandProjection_3_derived.bypass"
-# "ByP_w_capacityDemandProjection_4_paperish.bypass"
-# "no.bypass"
-# "ByP_w_capacityDemandProjection_5_Two_sided.bypass"
-"ByP_w_capacityDemandProjection_3_derived"
-# "ByP_capacityDemandProjection_2.bypass"
-# "ByP_w_capacityDemandProjection_2.bypass"
+# Format: "L1model L2model L3model"
+# Each model name should match a file in champsim_v10/src/ByP_Models/
+# with the appropriate extension (.l1_bypass / .l2_bypass / .llc_bypass)
+# Example: "00-mu_cy_DemandSupply 00-mu_cy_DemandSupply 00-mu_cy_DemandSupply"
 
-# "ByP_cleanApcLpmScore.bypass"
-# "ByP_fixCapacityDemandProjection.bypass"
-# "ByP_freeCreditApcRatio.bypass"
-# "ByP_l1ReliefVsL2Cost.bypass"
-# "ByP_queueAwareApcLpmScore.bypass"
-# "ByP_queueWeightedProjection.bypass"
-# "ByP_ratioApcLpmScore.bypass"
-# "ByP_softBudgetWindow.bypass"
-# "ByP_threeLevelCascadeScore.bypass"
-# "ByP_w_capacityDemandProjection.bypass"
-# "ByP_x2OpinionPowerLaw.bypass"
-    
-# "ByP_capacityDemandProjection.bypass"
-# "ByP_apcLpmOnly.bypass"
-# "ByP_l1cap_l2creditCheck.bypass"
-# "ByP_layerMismatch25x.bypass"
-# "ByP_rqOccupancyLpmGated.bypass"
-# "ByP_trigger30.bypass"
-# "ByP_windowBudgetModel.bypass"
-
-# "B001_trigger_30pct.bypass"
-# "B002_trigger_40pct.bypass"
-# "B003_trigger_50pct.bypass"
-# "B004_trigger_60pct.bypass"
-# "B005_trigger_70pct.bypass"
-# "B006_trigger_80pct.bypass"
-# "B007_rqcost_03x.bypass"
-# "B008_rqcost_04x.bypass"
-# "B009_rqcost_05x.bypass"
-# "B010_rqcost_06x.bypass"
-# "B011_rqcost_07x.bypass"
-# "B012_rqcost_08x.bypass"
-# "B013_rqcost_09x.bypass"
-# "B014_rqcost_10x.bypass"
-# "B015_lpmrgate_05.bypass"
-# "B016_lpmrgate_06.bypass"
-# "B017_lpmrgate_07.bypass"
-# "B018_lpmrgate_08.bypass"
-# "B019_lpmrgate_09.bypass"
-# "B020_lpmrgate_10.bypass"
-# "B021_apc_l1d_threshold_02.bypass"
-# "B022_apc_l1d_threshold_03.bypass"
-# "B023_apc_ratio_trigger.bypass"
-# "B024_apc_l2c_low_threshold.bypass"
-# "B025_apc_l2c_med_threshold.bypass"
-# "B026_inv_apc_ratio.bypass"
-# "B027_camat_l1d_high.bypass"
-# "B028_camat_l1d_med.bypass"
-# "B029_camat_l2c_low.bypass"
-# "B030_camat_l2c_med.bypass"
-# "B031_camat_ratio_budget.bypass"
-# "B032_inv_camat_budget.bypass"
-# "B033_mu_l1d_threshold_03.bypass"
-# "B034_mu_l1d_threshold_05.bypass"
-# "B035_mu_l2c_threshold_02.bypass"
-# "B036_kappa_l1d_threshold_02.bypass"
-# "B037_kappa_l1d_threshold_04.bypass"
-# "B038_mu_kappa_combined.bypass"
-# "B039_mshr_l1d_30pct.bypass"
-# "B040_mshr_l1d_50pct.bypass"
-# "B041_mshr_l1d_70pct.bypass"
-# "B042_mshr_dynamic_threshold.bypass"
-# "B043_mshr_free_slots_count.bypass"
-# "B044_mshr_free_slots_ratio.bypass"
-# "B045_exponential_cost.bypass"
-# "B046_logarithmic_budget.bypass"
-# "B047_power_law_cost.bypass"
-# "B048_harmonic_mean_budget.bypass"
-# "B049_geometric_mean_budget.bypass"
-# "B050_weighted_product_gate.bypass"
-# "B051_adaptive_threshold_cam.bypass"
-# "B052_cascade_penalty_squared.bypass"
-# "B053_three_level_cascade.bypass"
-# "B054_apc_cam_product_gate.bypass"
-# "B055_lpmr_diff_gate.bypass"
-# "B056_rq_pq_combined_pressure.bypass"
+"00-mu_cy_DemandSupply 00-mu_cy_DemandSupply 00-mu_cy_DemandSupply"
+"03-camat_Serialization 03-camat_Serialization 03-camat_Serialization"
+"06-kappa_PureMissCycle 06-kappa_PureMissCycle 06-kappa_PureMissCycle"
+"09-mst_Comparison 09-mst_Comparison 09-mst_Comparison"
+"12-remainMiss_WindowGate 12-remainMiss_WindowGate 12-remainMiss_WindowGate"
+"15-hitPeriod_OverlapPredict 15-hitPeriod_OverlapPredict 15-hitPeriod_OverlapPredict"
+"18-xCy_OverlapHeadroom 18-xCy_OverlapHeadroom 18-xCy_OverlapHeadroom"
+"21-phi_FillReuseVsMissGain 21-phi_FillReuseVsMissGain 21-phi_FillReuseVsMissGain"
+"cycle_hit_miss_based cycle_hit_miss_based cycle_hit_miss_based"
+"24-camatPerMiss_NextSlotNextCost 24-camatPerMiss_NextSlotNextCost 24-camatPerMiss_NextSlotNextCost"
+"27-camatPerMiss_UpperSatGate 27-camatPerMiss_UpperSatGate 27-camatPerMiss_UpperSatGate"
+"30-splitBudget_MissPerMiss 30-splitBudget_MissPerMiss 30-splitBudget_MissPerMiss"
+"ByP_capacityDemandProjection ByP_capacityDemandProjection ByP_capacityDemandProjection"
+"ByP_l1cap_l2creditCheck ByP_l1cap_l2creditCheck ByP_l1cap_l2creditCheck"
+"ByP_w_capacityDemandProjection_3_derived ByP_w_capacityDemandProjection_3_derived ByP_w_capacityDemandProjection_3_derived"
+"ByP_w_capacityDemandProjection ByP_w_capacityDemandProjection ByP_w_capacityDemandProjection"
+"ByP_W_capacityDemandProjection ByP_W_capacityDemandProjection ByP_W_capacityDemandProjection"
+"ByP_windowBudgetModel ByP_windowBudgetModel ByP_windowBudgetModel"
+"no no no"
+# "00-mu_cy_DemandSupply 00-mu_cy_DemandSupply 00-mu_cy_DemandSupply"
+# "03-camat_Serialization 03-camat_Serialization 03-camat_Serialization"
+# "06-kappa_PureMissCycle 06-kappa_PureMissCycle 06-kappa_PureMissCycle"
+# "09-mst_Comparison 09-mst_Comparison 09-mst_Comparison"
+# "12-remainMiss_WindowGate 12-remainMiss_WindowGate 12-remainMiss_WindowGate"
+# "15-hitPeriod_OverlapPredict 15-hitPeriod_OverlapPredict 15-hitPeriod_OverlapPredict"
+# "18-xCy_OverlapHeadroom 18-xCy_OverlapHeadroom 18-xCy_OverlapHeadroom"
+# "21-phi_FillReuseVsMissGain 21-phi_FillReuseVsMissGain 21-phi_FillReuseVsMissGain"
+# "24-camatPerMiss_NextSlotNextCost 24-camatPerMiss_NextSlotNextCost 24-camatPerMiss_NextSlotNextCost"
+# "27-camatPerMiss_UpperSatGate 27-camatPerMiss_UpperSatGate 27-camatPerMiss_UpperSatGate"
+# "30-splitBudget_MissPerMiss 30-splitBudget_MissPerMiss 30-splitBudget_MissPerMiss"
+# "ByP_w_capacityDemandProjection ByP_w_capacityDemandProjection ByP_w_capacityDemandProjection"
 )
 
 # =========================================================
@@ -661,22 +612,28 @@ build_binary_for_cfg() {
   local l1_pf="$3"
   local l2_pf="$4"
   local l3_pf="$5"
-  local model_file="$6"
-  local cached_bin="$7"
-  local logfile="$8"
+  local l1_model_name="$6"
+  local l2_model_name="$7"
+  local llc_model_name="$8"
+  local cached_bin="$9"
+  local logfile="${10}"
 
   local core_uarch="${arch_base}_${cores}c"
   local build_key builddir rc=0
 
-  local model_src="$(resolve_model_file "$model_file" ".l1_bypass")" || {
-        echo "[ERROR] missing L1 bypass model via find: $model_file" >> "$logfile"
+  local model_src="$(resolve_model_file "$l1_model_name" ".l1_bypass")" || {
+        echo "[ERROR] missing L1 bypass model via find: $l1_model_name" >> "$logfile"
         return 207
     }
-  local l2_model_src="$(resolve_model_file "$model_file" ".l2_bypass")" || {
-        echo "[WARN] no L2 bypass model for: $model_file (using fallback)" >> "$logfile"
+  local l2_model_src="$(resolve_model_file "$l2_model_name" ".l2_bypass")" || {
+        echo "[WARN] no L2 bypass model for: $l2_model_name (using fallback)" >> "$logfile"
         l2_model_src=""
     }
-  echo "[MODEL PATH] L1=$model_file L2=${l2_model_src:-fallback}" >> "$logfile"
+  local llc_model_src="$(resolve_model_file "$llc_model_name" ".llc_bypass")" || {
+        echo "[WARN] no LLC bypass model for: $llc_model_name (using fallback)" >> "$logfile"
+        llc_model_src=""
+    }
+  echo "[MODEL PATH] L1=$l1_model_name L2=${l2_model_src:-fallback} LLC=${llc_model_src:-fallback}" >> "$logfile"
   local arch_src="$CHAMPSIM_DIR/inc/Arch/${core_uarch}.h"
   local branch_src="$CHAMPSIM_DIR/branch/${BRANCH}.bpred"
   local l1_src="$CHAMPSIM_DIR/prefetcher/${l1_pf}.l1d_pref"
@@ -696,7 +653,7 @@ build_binary_for_cfg() {
 
   wait_for_work_space
 
-  build_key="$(sanitize "${arch_base}_${cores}_${l1_pf}_${l2_pf}_${l3_pf}_${model_file}_${BRANCH}_${LLC_REPLACEMENT}_${PGO_FILE}")"
+  build_key="$(sanitize "${arch_base}_${cores}_${l1_pf}_${l2_pf}_${l3_pf}_${l1_model_name}_${l2_model_name}_${llc_model_name}_${BRANCH}_${LLC_REPLACEMENT}_${PGO_FILE}")"
   builddir="$(mktemp -d "${RUN_ROOT}/build.${build_key}.XXXXXX")"
   : > "${builddir}/.active_build"
 
@@ -704,7 +661,7 @@ build_binary_for_cfg() {
     echo "[BUILD] isolated build dir: $builddir"
     echo "[BUILD] arch=${core_uarch}"
     echo "[BUILD] L1=${l1_pf} L2=${l2_pf} L3=${l3_pf}"
-    echo "[BUILD] model=${model_file}"
+    echo "[BUILD] l1_model=${l1_model_name} l2_model=${l2_model_name} llc_model=${llc_model_name}"
     echo "[BUILD] make -j${BUILD_JOBS} run_clang"
   } >> "$logfile"
 
@@ -724,6 +681,9 @@ build_binary_for_cfg() {
   if [[ -n "$l2_model_src" ]]; then
     cp "$l2_model_src" "$builddir/src/ooo_l2_byp_model.cc"   || { rm -f "${builddir}/.active_build"; return 219; }
   fi
+  if [[ -n "$llc_model_src" ]]; then
+    cp "$llc_model_src" "$builddir/src/ooo_llc_byp_model.cc" || { rm -f "${builddir}/.active_build"; return 222; }
+  fi
 
   sed -i.bak "s/^#define NUM_CPUS [0-9][0-9]*/#define NUM_CPUS ${cores}/" "$builddir/inc/champsim.h" || { rm -f "${builddir}/.active_build"; return 217; }
 
@@ -741,7 +701,7 @@ build_binary_for_cfg() {
     sed -i 's|^[[:space:]]*#define BYPASS_LLC_LOGIC|// #define BYPASS_LLC_LOGIC|' "$builddir/inc/champsim.h"
   fi
 
-  echo "[BUILD] Loaded bypass model: ${model_file} L2byp=${BYPASS_L2} L3byp=${BYPASS_LLC}" >> "$logfile"
+  echo "[BUILD] Loaded bypass models: L1=${l1_model_name} L2=${l2_model_name} LLC=${llc_model_name} | L2byp=${BYPASS_L2} L3byp=${BYPASS_LLC}" >> "$logfile"
 
     if [ "$DEBUG_LEVEL" -eq 2 ]; then
     (
@@ -798,12 +758,14 @@ ensure_binary() {
   local l1_pf="$3"
   local l2_pf="$4"
   local l3_pf="$5"
-  local model_file="$6"
-  local logfile="$7"
+  local l1_model_name="$6"
+  local l2_model_name="$7"
+  local llc_model_name="$8"
+  local logfile="$9"
 
   local build_key cache_dir cached_bin lockdir rc=0
 
-  build_key="$(sanitize "${arch_base}_${cores}_${l1_pf}_${l2_pf}_${l3_pf}_${model_file}_${BRANCH}_${LLC_REPLACEMENT}_${PGO_FILE}")"
+  build_key="$(sanitize "${arch_base}_${cores}_${l1_pf}_${l2_pf}_${l3_pf}_${l1_model_name}_${l2_model_name}_${llc_model_name}_${BRANCH}_${LLC_REPLACEMENT}_${PGO_FILE}")"
   cache_dir="${BIN_CACHE_ROOT}/${build_key}"
   cached_bin="${cache_dir}/champsim"
   lockdir="${cache_dir}.lockdir"
@@ -824,7 +786,7 @@ ensure_binary() {
     return 0
   fi
 
-  build_binary_for_cfg "$arch_base" "$cores" "$l1_pf" "$l2_pf" "$l3_pf" "$model_file" "$cached_bin" "$logfile"
+  build_binary_for_cfg "$arch_base" "$cores" "$l1_pf" "$l2_pf" "$l3_pf" "$l1_model_name" "$l2_model_name" "$llc_model_name" "$cached_bin" "$logfile"
   rc=$?
 
   release_lockdir "$lockdir"
@@ -838,20 +800,24 @@ ensure_binary() {
 
 run_one() {
   local cores="$1"
-  local model_name_raw="$2"
+  local model_spec="$2"
   local trace_hint="$3"
   local l1_pf="$4"
   local l2_pf="$5"
   local l3_pf="$6"
 
-  local model_file model_tag trace_tag out_dir logfile
+  local l1_model l2_model llc_model model_tag trace_tag out_dir logfile
   local trace_file trace_base arch_base cached_bin
   local warmup sim rc build_rc
   local trace_args=()
   local i
 
-  model_file="$(normalize_model_name "$model_name_raw")"
-  model_tag="$(sanitize "$model_file")"
+  read -r l1_model l2_model llc_model <<< "$model_spec"
+  [[ -n "${l1_model:-}" ]] || { echo "[ERROR] bad MODEL_LIST item (missing L1 model): '$model_spec'"; return 1; }
+  [[ -n "${l2_model:-}" ]] || l2_model="$l1_model"
+  [[ -n "${llc_model:-}" ]] || llc_model="$l1_model"
+
+  model_tag="$(sanitize "${l1_model}_${l2_model}_${llc_model}")"
   trace_tag="$(sanitize "$trace_hint")"
 
   out_dir="${OUT_ROOT_ABS}/core${cores}"
@@ -859,22 +825,22 @@ run_one() {
   logfile="${out_dir}/L1-${l1_pf}-L2-${l2_pf}-L3-${l3_pf}-${trace_tag}-${model_tag}.log"
 
   {
-    echo "[START] cores=${cores} model=${model_file} trace=${trace_hint} L1=${l1_pf} L2=${l2_pf} L3=${l3_pf}"
+    echo "[START] cores=${cores} l1_model=${l1_model} l2_model=${l2_model} llc_model=${llc_model} trace=${trace_hint} L1=${l1_pf} L2=${l2_pf} L3=${l3_pf}"
     echo "[CFG] DEBUG_LEVEL=${DEBUG_LEVEL} DO_MIN_SIM=${DO_MIN_SIM} BUILD_JOBS=${BUILD_JOBS}"
     echo "[CFG] current MAX_CONCURRENT_PROCS=$(current_max_procs)"
   } > "$logfile"
 
   trace_file="$(resolve_trace_file "$trace_hint")" || {
     echo "[ERROR] trace not found for hint: ${trace_hint}" >> "$logfile"
-    append_failed_row "$trace_hint" "$model_file" "$l1_pf" "$l2_pf" "$l3_pf" "$cores" 301 "$logfile"
-    echo "[FAIL] model=${model_file} trace=${trace_hint} rc=301"
+    append_failed_row "$trace_hint" "$model_tag" "$l1_pf" "$l2_pf" "$l3_pf" "$cores" 301 "$logfile"
+    echo "[FAIL] model=${model_tag} trace=${trace_hint} rc=301"
     return 301
   }
 
   arch_base="$(resolve_arch_base "$cores")" || {
     echo "[ERROR] could not resolve ARCH_BASE for cores=${cores}. Set ARCH_BASE explicitly in script." >> "$logfile"
-    append_failed_row "$trace_hint" "$model_file" "$l1_pf" "$l2_pf" "$l3_pf" "$cores" 302 "$logfile"
-    echo "[FAIL] model=${model_file} trace=${trace_hint} rc=302"
+    append_failed_row "$trace_hint" "$model_tag" "$l1_pf" "$l2_pf" "$l3_pf" "$cores" 302 "$logfile"
+    echo "[FAIL] model=${model_tag} trace=${trace_hint} rc=302"
     return 302
   }
 
@@ -887,11 +853,11 @@ run_one() {
     echo "[RUN] warmup=${warmup} sim=${sim}"
   } >> "$logfile"
 
-  cached_bin="$(ensure_binary "$arch_base" "$cores" "$l1_pf" "$l2_pf" "$l3_pf" "$model_file" "$logfile")"
+  cached_bin="$(ensure_binary "$arch_base" "$cores" "$l1_pf" "$l2_pf" "$l3_pf" "$l1_model" "$l2_model" "$llc_model" "$logfile")"
   build_rc=$?
   if (( build_rc != 0 )); then
-    append_failed_row "$trace_hint" "$model_file" "$l1_pf" "$l2_pf" "$l3_pf" "$cores" "$build_rc" "$logfile"
-    echo "[FAIL] model=${model_file} trace=${trace_hint} rc=${build_rc}"
+    append_failed_row "$trace_hint" "$model_tag" "$l1_pf" "$l2_pf" "$l3_pf" "$cores" "$build_rc" "$logfile"
+    echo "[FAIL] model=${model_tag} trace=${trace_hint} rc=${build_rc}"
     return "$build_rc"
   fi
 
@@ -905,17 +871,17 @@ run_one() {
 #   } >> "$logfile"
 
   "$cached_bin" -warmup "$warmup" -simulation_instructions "$sim" \
-    --db "$DB_FNAME" --arch "$arch_base" --bypass "$model_file" \
+    --db "$DB_FNAME" --arch "$arch_base" --bypass "${l1_model}.l1_bypass" \
     --pf_l1 "$l1_pf" --pf_l2 "$l2_pf" --pf_l3 "$l3_pf" \
     -traces "${trace_args[@]}" >> "$logfile" 2>&1
   rc=$?
 
   if (( rc == 0 )); then
-    append_result_row "$trace_hint" "$model_file" "$l1_pf" "$l2_pf" "$l3_pf" "$logfile"
-    echo "[DONE] model=${model_file} trace=${trace_base} L1=${l1_pf} L2=${l2_pf} L3=${l3_pf}"
+    append_result_row "$trace_hint" "$model_tag" "$l1_pf" "$l2_pf" "$l3_pf" "$logfile"
+    echo "[DONE] model=${model_tag} trace=${trace_base} L1=${l1_pf} L2=${l2_pf} L3=${l3_pf}"
   else
-    append_failed_row "$trace_hint" "$model_file" "$l1_pf" "$l2_pf" "$l3_pf" "$cores" "$rc" "$logfile"
-    echo "[FAIL] model=${model_file} trace=${trace_base} rc=${rc}"
+    append_failed_row "$trace_hint" "$model_tag" "$l1_pf" "$l2_pf" "$l3_pf" "$cores" "$rc" "$logfile"
+    echo "[FAIL] model=${model_tag} trace=${trace_base} rc=${rc}"
   fi
 
   return "$rc"
@@ -957,10 +923,10 @@ done
 echo "TOTAL RUNS: $totRunCnt"
 
 currRunCnt=0
+for cores in "${CORE_LIST[@]}"; do
   for model_name in "${MODEL_LIST[@]}"; do
     for trace in "${TRACE_LIST[@]}"; do
       for pf_spec in "${PREFETCH_LIST[@]}"; do
-for cores in "${CORE_LIST[@]}"; do
         ((currRunCnt++))
 
         read -r l1_pf l2_pf l3_pf <<< "$pf_spec"
@@ -973,7 +939,8 @@ for cores in "${CORE_LIST[@]}"; do
         (
           run_one "$cores" "$model_name" "$trace" "$l1_pf" "$l2_pf" "$l3_pf"
         ) &
-        echo "STARTED: $currRunCnt out of $totRunCnt | max_now=$(current_max_procs) | running_now=$(count_running_jobs) | $(grep 'cout << ' "$(resolve_model_file "$model_name")")"
+        { read -r _l1m _l2m _l3m <<< "$model_name"; } 2>/dev/null || true
+        echo "STARTED: $currRunCnt out of $totRunCnt | max_now=$(current_max_procs) | running_now=$(count_running_jobs) | $(grep 'cout << ' "$(resolve_model_file "${_l1m:-$model_name}" ".l1_bypass" 2>/dev/null)" 2>/dev/null || true)"
 
         sleep "$LAUNCH_DELAY_SEC"
       done

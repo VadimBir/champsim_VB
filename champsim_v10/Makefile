@@ -37,7 +37,7 @@ BIN = ./$(binDir)/perceptron-$(L1D_Pf)-$(L2C_Pf)-$(LLC_Pf)-lru-$(CORES)core
 # Repeat trace file per core if CORES > 1
 TRACE_LIST := $(shell for i in $$(seq 1 $(CORES)); do echo -n "$(homo_traces) "; done)
 
-CFlags = -Wall -O3 -std=c++17 -D_DEFAULT_SOURCE -fno-omit-frame-pointer -g
+CFlags = -Wall -O3 -std=c++17 -D_DEFAULT_SOURCE -fno-omit-frame-pointer -g $(EXTRA_CFLAGS)
 #CFlags = -Wall -O0 -std=c++17 -D_DEFAULT_SOURCE -g -rdynamic -fno-omit-frame-pointer -fno-inline -fno-inline-functions -fno-optimize-sibling-calls # -fno-omit-frame-pointer -g
 
 #build_Wno-warnings:
@@ -72,6 +72,19 @@ run:
 	@$(BIN) -warmup_instructions $(WARMUP_instr) \
 	          -simulation_instructions $(SIM_instr) \
 	          -traces $(TRACE_LIST)
+perf_profile:
+	@echo "Launching $(BIN) for perf profiling (2 cores, 4M warmup, 9M sim)..."
+	@$(BIN) -warmup_instructions 4000000 -simulation_instructions 9000000 \
+	    -traces ../traces/LLM256.Pythia-70M_21M.champsimtrace.xz ../traces/LLM256.Pythia-70M_21M.champsimtrace.xz \
+	    & SIM_PID=$$!; \
+	echo "sim PID=$$SIM_PID, attaching perf for 30s..."; \
+	sleep 1; \
+	perf record -e cycles:pp --call-graph=fp -F 9999 --mmap-pages=16384 \
+	    --pid=$$SIM_PID -o perf.data -- sleep 30; \
+	wait $$SIM_PID 2>/dev/null || true; \
+	echo "--- perf report (top 40 symbols) ---"; \
+	perf report --stdio --no-children -n --sort=symbol -i perf.data 2>/dev/null | head -80
+
 build_run:
 	@echo "Building ChampSim binary..."
 	@./build_champsim.sh $(ARCH)_$(CORES)c $(L1D_Pf) $(L2C_Pf) $(LLC_Pf) $(CORES) 2>&1
@@ -113,6 +126,12 @@ run_aocc:
 run_clang:
 	@echo "=== Forcing Clang compilation ==="
 	@$(MAKE) FORCE_COMPILER=clang all
+
+rpass:
+	@echo "=== Building with clang -Rpass (optimization remarks) ==="
+	@$(MAKE) FORCE_COMPILER=clang CORES=$(CORES) \
+	    EXTRA_CFLAGS="-Rpass=loop-vectorize -Rpass-missed=loop-vectorize -Rpass-analysis=loop-vectorize" \
+	    build 2>&1 | grep -E "remark:|ooo_cpu|cache\.cc|block\.cc" | head -80
 
 AOCC_PATH := /opt/aocc-compiler-5.0.0/bin/clang++
 

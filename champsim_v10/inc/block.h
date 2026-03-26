@@ -233,8 +233,6 @@ public:
         dest.l2_bypassed = src.l2_bypassed;
         dest.llc_bypassed = src.llc_bypassed;
         dest.fill_level = src.fill_level;
-
-
     }
     template <typename T>
     inline void fast_copy_fastset(T &dest, const T &src)
@@ -583,7 +581,7 @@ PACKET_QUEUE() :
 
     // }
 
-    int check_queue(PACKET *packet);
+    int check_queue(PACKET *packet) const;
     void add_queue(PACKET *packet), remove_queue(PACKET *packet);
 };
 

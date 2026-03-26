@@ -1,0 +1,1863 @@
+#include "cache.h"
+#include <map>
+#include <unordered_map>
+#include <vector>
+#include <utility>
+#include <algorithm>
+#include <numeric>
+#include <list>
+#include <cstdint>
+#include <unordered_set>
+#include <iomanip>
+#include <string>
+   
+using namespace std;
+
+#define DGB_ALWAYS_PF false
+#define DBG_Pf_TRACKER_PRINT false 
+#define TRACKER_STATS_PRINT_PERIOD 25000
+
+// Global variables - EXACT as original
+unordered_map<int, int> prefetcher_count;
+unordered_map<int, bool> isPfActive;
+unordered_map<int, int> number_of_inRowPfInactivity;
+double entryFrequency = 0;
+int new_entry_count = 0;
+int pf_cnt = 0;
+uint64_t NUM_CACHELINES = 0;
+uint64_t pre_previous_addr = 0;
+uint64_t previous_addr = 0;
+uint64_t pf_addr = 0;
+int64_t cnt = 0;
+vector<uint8_t> debugger = {};
+int MSHR_win_cnt = 0;
+int print_cnt = 0;
+double nxtH = 0;
+unordered_map<int,int> nxtH_cnt;
+unordered_map<int,double> pf_nxtH_acc;
+int flagged = 0;
+unordered_map<int,int> pf_guess_cnt;
+int tH_cnt = 0;
+vector<pair<uint64_t, int>> currentRound_prefetches;
+double nxtAddrHit_IP_Stride_avg = 0;
+int nxtAddrHit_IP_Stride_avg_cnt = 0;
+unordered_map<int,double> pf_nxtH_acc_avg;
+unordered_map<int,int> pf_nxtH_acc_cnt;
+uint64_t preIP = 0;
+
+
+#define MT_DEGREE 1 // IP stride style degree allowing DEGREE i prefetches at block+(delta*i) 
+#define MT_DEPTH 1 // TO DO YET
+
+#define IP_TRACKER_COUNT 320
+#define PREFETCH_DEGREE 8
+#define IPSTR_ID 0
+#define WINDOW 512
+
+// Config struct with string-based tracking
+struct MT_Config {
+    int lru_size = 0;
+    int tracking_max = 0; 
+    int tracking_min = 0;
+    int percent_threshold = 0;
+    int prefetcher_id = 0;
+    int IP_BITS = 20;
+    int IP_MODULO_BOUND = 2048;
+    int8_t COUNT_BITS = 16;
+    string tracking_key = "ip";
+    string tracking_value = "delta_block";
+    string counter_policy = "CAP";
+    string candidate_selection_policy = "TopK_Thresh";
+    // string candidate_selection_policy = "Elbow";
+};
+
+
+// Simplified access data structure - only current access info
+struct AccessData {
+    // Current access
+    uint64_t addr;
+    uint64_t ip;
+    uint64_t block;
+    uint64_t page;
+    int64_t block2page;
+    int64_t delta_ip;               // Delta = prev - current access to show the change
+    int64_t delta_page;             // Delta = prev - current access to show the change
+    int64_t delta_block;            // Delta = prev - current access to show the change
+    
+    unordered_map<int64_t, uint64_t>* key_prev_block_ref = nullptr;
+    unordered_map<int64_t, int64_t>* key_prev_stride_ref = nullptr; // used to verify the stride observed in second occurance and compare with stride in third occurance.
+    bool is_filled = false;
+    
+    AccessData() : addr(0), ip(0), block(0), page(0), block2page(0) {}
+    
+    void init_process_access(uint64_t new_addr, uint64_t new_ip) {
+        addr = new_addr; // BASICALLY A BLOCK
+        ip = new_ip;
+        block = addr; 
+        page = addr >> 12;
+        
+        // Calculate block number relative to page start
+        uint64_t page_start_block = page << LOG2_PAGE_SIZE;
+        // get page's first block 
+        // page_start = page << 12; // page * 4096
+        block2page = block - page_start_block;
+        is_filled = true;
+    }    
+    int64_t get_key(MT_Config* cfg,  AccessData& prev_access_data) const {
+        string name = cfg->tracking_key;
+        // if (name == "addr") return addr; // basically is a block
+        if (name == "block") return block;
+        if (name == "delta_block") return (int64_t)(prev_access_data.block)-(int64_t)(block);
+        if (name == "block2page") return block2page;
+        
+        if (name == "ip") return get_fibo_hash_ip(cfg, ip);
+        if (name == "delta_ip") return (int64_t)(prev_access_data.ip)-(int64_t)(ip);
+        
+        // if (name == "pre_delta_ip") return (int64_t)(prev_access_data.delta_ip); 
+        if (name == "page") return page;
+        if (name == "delta_page") return (int64_t)(prev_access_data.page)-(int64_t)(page);
+        return 0;
+    }
+    int64_t get_value(MT_Config* cfg, AccessData& prev_access_data) {
+        string name = cfg->tracking_value;
+        if (name == "addr") return addr;
+        if (name == "block2page") return block2page;
+        if (name == "block") return block;
+        if (name == "delta_block") return (int64_t)(prev_access_data.block)-(int64_t)(block);
+        if (name == "delta_ip") return (int64_t)(prev_access_data.ip)-(int64_t)(ip);
+        // stride: 1. get prev occurance 2. update previous to new occurance 3. calculate stride from previous occurance with 
+        // SEEMS TO WORK // if (name == "stride_block") { uint64_t prev = (*key_prev_block_ref)[ip]; (*key_prev_block_ref)[ip] = block; if (prev != 0) return (int64_t) block - (int64_t) prev; return INT64_MIN;}
+        
+        // three-pahse stride: 1. on IP store its block 2. on repeat IP get its prev occurance block 3. calculate stride, update the prev occurance and remember stride 4. only when third ocurance of IP occur we calculate the new stride and compare with prev stride of same IP
+        // If and only if the third IP occurance gives the same stride as second occurance, we train table!!! 
+        
+        // MISTAKE: unline trad IP Stride no third verification here 
+        // if (name == "stride_block") { uint64_t prev = (key_prev_block_ref)[prev_access_data.ip]; (key_prev_block_ref)[prev_access_data.ip] = prev_access_data.block; if (prev != 0) return (int64_t) prev_access_data.block - (int64_t) prev; return INT64_MIN;}
+        
+        if (name == "stride_block") { uint64_t prev_addr = (*key_prev_block_ref)[prev_access_data.ip]; (*key_prev_block_ref)[prev_access_data.ip] = block;
+            if (prev_addr != 0) { int64_t current_stride = (int64_t)block - (int64_t)prev_addr; int64_t last_stride = (*key_prev_stride_ref)[prev_access_data.ip]; (*key_prev_stride_ref)[prev_access_data.ip] = current_stride;
+                if (last_stride != 0 && current_stride == last_stride) {return current_stride;}
+            } return INT64_MIN;
+        } return 0;
+    }
+    uint64_t get_fibo_hash_ip(MT_Config* cfg, uint64_t ip) const {
+        static constexpr uint64_t fibonacci_multiplier = 11400714819323198486ULL;
+        // uint64_t hash_result = ip * fibonacci_multiplier;
+        uint64_t hash_result = (ip>>1) ^ (ip >> 4) ;
+        // uint64_t hash_result = (ip) ^ (page) ;
+        // extract IP_BITS low bits for indexing
+        uint64_t hash_trunc = hash_result & ((1ULL << cfg->IP_BITS) - 1);
+        return hash_trunc;
+    }
+};
+
+// Single shared AccessData instance
+AccessData shared_access_data;
+
+
+// Config instances
+MT_Config mt_ip_stride; 
+MT_Config mt1_config;
+MT_Config mt2_config;
+MT_Config mt3_config;
+MT_Config mt4_config;
+MT_Config mt5_config;
+MT_Config mt6_config;
+MT_Config mt7_config;
+MT_Config mt8_config;
+
+class IDMM {
+    public:
+    AccessData prev_access_data; // used for table training. Previous Key: Current Value. This MUST be instance specific
+    AccessData pre_prev_access_data; // used for to store the first occurance IP block and second occurance IP block
+    int64_t training_key = 0;
+    int64_t training_value = 0;
+    int64_t prediction_key = 0;
+    // IDMM() : markov_LRU_front(0), pf_addr(0), config_ptr(nullptr), MT_limit(0) {}
+    IDMM() : markov_LRU_front(0), pf_addr(0), config_ptr(nullptr), MT_limit(0) {
+        prev_access_data.key_prev_block_ref = &key_prev_block;
+        pre_prev_access_data.key_prev_block_ref = &key_prev_block;
+        prev_access_data.key_prev_stride_ref = &key_prev_stride;      // Add
+        pre_prev_access_data.key_prev_stride_ref = &key_prev_stride;  // Add
+    }
+    void set_config(MT_Config* cfg) {
+        config_ptr = cfg;
+        MT_limit = cfg->lru_size;
+        markov_LRU.clear();
+        markov_LRU.reserve(MT_limit);
+    }
+
+    // 3-phase operation: Extract patterns -> Train transitions -> Predict next accesses
+    // vector<int64_t> operate(const AccessData& access_data, uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type) {
+    vector<int64_t> operate(AccessData& access_data) {
+        // IDMM has extra hashtable for stride functionality, input access_data is one created elsewhere and is global. 
+        // here we asign a reference to key_prev_block to access_data, so that it can be used for stride calculations if needed according to config
+        access_data.key_prev_block_ref = &key_prev_block;
+        access_data.key_prev_stride_ref = &key_prev_stride;  // specifically used for stride
+        
+        // REMINDER: TEST CASE: EXIT UPON REPEATED ACCESS OF SAME KEY AND VAL BLOCK, i.e. TRAINING AND PREDICTION KEY ARE THE SAME
+
+        // 1. Get key and value based on per MT config 
+        prediction_key = access_data.get_key(config_ptr, prev_access_data); // NOTE: We use access_data itself 
+        
+        // Training requires, previous singleton data, or pre_prev data with prev data for delta. 
+        training_key = prev_access_data.get_key(config_ptr, pre_prev_access_data); // during training this comes from previous access (which initially is NON but compiler is fine) if issue, must have a check
+        // training_value = (int64_t)prev_access_data.block-(int64_t)access_data.block;      
+        training_value = access_data.get_value(config_ptr, prev_access_data); // NOTE: We use access_data itself 
+             
+        
+        // 2. Update the markov table
+        IteratorType key_it;
+        unordered_map<int64_t, int>::iterator val_it = markov_table.begin()->second.end();
+            // Range-based training filter: only train on meaningful spatial displacements
+            if ((abs(training_value) >= config_ptr->tracking_min && abs(training_value) <= config_ptr->tracking_max)){
+                if (training_value != -1 && training_value != -2 && training_value != -4) {
+                    // markov_table[training_key][training_value]++;
+                    int64_t newCounter = inc_count(markov_table[training_key][training_value]);
+                    markov_table[training_key][training_value] = newCounter; // Update the count for this key-value pair
+                }
+            }
+
+            key_it = markov_table.find(training_key);
+            if ((abs(training_value) >= config_ptr->tracking_min && abs(training_value) <= config_ptr->tracking_max)) {
+                if (training_value != -1 && training_value != -2 && training_value != -4) {
+                    val_it = key_it->second.find(training_value);
+                }
+            }
+
+        // 3. Predict next access based on table
+        vector<int64_t> pf_topP;
+        if (config_ptr->candidate_selection_policy == "Elbow") {
+            pf_topP = markov_prefetcher_Elbow(prediction_key, key_it, val_it);
+        } else if (config_ptr->candidate_selection_policy == "TopK_Thresh") {
+            pf_topP = markov_prefetcher_TopK_Thresh(prediction_key, key_it, val_it);
+        } else { 
+            throw std::runtime_error("Unknown candidate selection policy: " + config_ptr->candidate_selection_policy);
+        }
+
+
+        // Update instance state which is required for 2. Key(Prev access):Value(Current access) 
+        pre_prev_access_data = prev_access_data; // store previous access data for next delta calculations
+        prev_access_data = access_data;
+
+        
+        return pf_topP;
+    }
+
+    vector<int64_t> elbow_query(uint64_t query_ip) {
+        vector<int64_t> top_predictions;
+        
+        auto it = markov_table.find(query_ip);
+        if (it != markov_table.end()) {
+            auto &next_blocks = it->second;
+            vector<pair<int64_t, int>> predictions(next_blocks.begin(), next_blocks.end());
+            sort(predictions.begin(), predictions.end(),
+                [](pair<int64_t, int> &a, pair<int64_t, int> &b) {
+                    return a.second > b.second;
+                });
+            
+            int total_count = accumulate(predictions.begin(), predictions.end(), 0,
+                [](int sum, pair<int64_t, int>& p) {
+                    return sum + p.second;
+                });
+            
+            if (predictions.size() <= 2) {
+                // Not enough points for curvature analysis
+                for (auto &prediction : predictions) {
+                    top_predictions.push_back(prediction.first);
+                }
+            } else {
+                // Calculate probabilities
+                vector<double> probs;
+                for (auto& p : predictions) {
+                    probs.push_back((double)p.second / total_count);
+                }
+                
+                // Calculate second derivatives (curvature)
+                vector<double> second_deriv;
+                for (int i = 1; i < probs.size() - 1; i++) {
+                    second_deriv.push_back(probs[i-1] - 2*probs[i] + probs[i+1]);
+                }
+                
+                // Find maximum curvature point (elbow)
+                int elbow_idx = max_element(second_deriv.begin(), second_deriv.end()) 
+                                - second_deriv.begin() + 1;
+                
+                // Select candidates up to elbow point (at least top-1)
+                int select_count = max(1, elbow_idx + 1);
+                for (int i = 0; i < select_count && i < predictions.size(); i++) {
+                    top_predictions.push_back(predictions[i].first);
+                }
+            }
+        }
+        return top_predictions;
+    }
+
+    // it queries prediction without updating state
+    vector<int64_t> query_predictions(uint64_t query_ip) {
+        vector<int64_t> top_predictions;
+        
+        auto it = markov_table.find(query_ip);
+        if (it != markov_table.end()) {
+            auto &next_blocks = it->second;
+            vector<pair<int64_t, int>> predictions(next_blocks.begin(), next_blocks.end());
+            sort(predictions.begin(), predictions.end(),
+                [](pair<int64_t, int> &a, pair<int64_t, int> &b) {
+                    return a.second > b.second;
+                });
+            int total_count = accumulate(predictions.begin(), predictions.end(), 0,
+                [](int sum, pair<int64_t, int>& p) {
+                    return sum + p.second;
+                });
+            for (auto &prediction : predictions) {
+                if ((static_cast<double>(prediction.second) * 100 / total_count) >= config_ptr->percent_threshold) {
+                    top_predictions.push_back(prediction.first);
+                } else {
+                    break;
+                }
+            }
+        }
+        return top_predictions;
+    }
+
+    private:
+    unordered_map<int64_t, unordered_map<int64_t, int>> markov_table;
+    
+    // is used to store first part of stride, second part is access it self. 
+    // 1. the key must match the key of markov_table. 2. IP_Stride pf only when it is the repeating stride and is tripple repeating IP.
+    // First IPx, make entry, Second IPx, calc stride, Third IPx, if same stride then prefetch otherwise, update.  
+    unordered_map<int64_t, uint64_t> key_prev_block; 
+    unordered_map<int64_t, int64_t> key_prev_stride;
+
+    using IteratorType = unordered_map<int64_t, unordered_map<int64_t, int>>::iterator;
+    vector<unordered_map<int64_t, int>::iterator> markov_LRU;
+    int markov_LRU_front;
+    uint64_t pf_addr;
+    
+    MT_Config* config_ptr;
+    int MT_limit;
+    int64_t inc_count(int64_t entry_count) {
+        
+        entry_count++;
+        if (entry_count >= (1ULL << config_ptr->COUNT_BITS)) {
+            if (config_ptr->counter_policy == "CAP") {
+                entry_count = (1ULL << config_ptr->COUNT_BITS) - 1;
+            }
+        }
+        if (entry_count >= (1ULL << config_ptr->COUNT_BITS) && (config_ptr->counter_policy == "CAP")) {
+            throw std::runtime_error("IDMM Counter overflow at line " + std::to_string(__LINE__));
+        }
+        return entry_count;
+    }
+
+    // Iterator-based LRU eviction: returns iterator to least recently used VALUE
+    unordered_map<int64_t, int>::iterator markov_evict_lru() {                          // evict the least recently used value
+        if (markov_LRU.empty()) return markov_table.begin()->second.end();              // if LRU is empty, return end iterator
+        unordered_map<int64_t, int>::iterator val_it = markov_LRU[0];                   // get the least recently used value's iterator
+        for (int i = 1; i < markov_LRU_front && i < (int)markov_LRU.size(); i++) {      // shift the LRU
+            markov_LRU[i - 1] = markov_LRU[i];      
+        }
+        return val_it;                                                                  // Return victim iterator for table deletion (Specifically )
+    }
+
+    // move the value to the front of the LRU       
+    void markov_update_lru(int index) {
+        if (index >= markov_LRU.size() || markov_LRU_front <= 0) return;                        // if index is out of bounds or LRU is empty, return
+        auto tmpVal = markov_LRU[index];                                                        // store the value to be moved
+        for (int i = index; i < markov_LRU_front - 1 && i < (int)markov_LRU.size() - 1; i++) {  // shift the LRU
+            markov_LRU[i] = markov_LRU[i + 1];                                                  
+        }
+        if (markov_LRU_front > 0) {                                                             // if LRU has active elements, place at MRU position                        
+            markov_LRU[markov_LRU_front - 1] = tmpVal;
+        }
+    }
+    vector<int64_t> markov_prefetcher_Elbow(int64_t lookup_key, IteratorType key_it, unordered_map<int64_t, int>::iterator val_it) {
+        vector<int64_t> top_predictions; // init Pf collector
+
+        auto it = markov_table.find(lookup_key);                                            // find the key in the table
+        if (it != markov_table.end()) {                                                     // if key is found
+            auto &next_blocks = it->second;    
+            vector<pair<int64_t, int>> predictions(next_blocks.begin(), next_blocks.end()); // convert {Search Key: Value : Count} into vector with [Value:Count] for a given key
+            sort(predictions.begin(), predictions.end(),                                    // sort the vector by count 
+                      [](pair<int64_t, int> &a, pair<int64_t, int> &b) {
+                          return a.second > b.second;
+                      });
+            int total_count = accumulate(predictions.begin(), predictions.end(), 0,         // sum the count of all predictions and use for confidence
+                [](int sum, pair<int64_t, int>& p) {
+                    return sum + p.second;
+                });
+            
+            if (predictions.size() <= 2) {                                                  // Not enough points for curvature analysis - take all
+                for (auto &prediction : predictions) {
+                    top_predictions.push_back(prediction.first);
+                }
+            } else {                                                                        // Use elbow method for candidate selection
+                vector<double> probs;                                                       // Calculate probabilities for curvature analysis
+                for (auto& p : predictions) {
+                    probs.push_back((double)p.second / total_count);
+                }
+                
+                vector<double> second_deriv;                                                // Calculate second derivatives (curvature)
+                for (int i = 1; i < probs.size() - 1; i++) {
+                    second_deriv.push_back(probs[i-1] - 2*probs[i] + probs[i+1]);
+                }
+                
+                int elbow_idx = max_element(second_deriv.begin(), second_deriv.end())       // Find maximum curvature point (elbow)
+                                - second_deriv.begin() + 1;
+                
+                int select_count = max(1, elbow_idx + 1);                                   // Select candidates up to elbow point (at least top-1)
+                for (int i = 0; i < select_count && i < predictions.size(); i++) {         // add predictions to Pf collector based on elbow detection
+                    top_predictions.push_back(predictions[i].first);
+                }
+            }
+        }
+        
+        auto lru_it = find(markov_LRU.begin(), markov_LRU.begin() + min(markov_LRU_front, (int)markov_LRU.size()), val_it); // update LRU 
+        if (lru_it != markov_LRU.begin() + min(markov_LRU_front, (int)markov_LRU.size())) {                                 // if key is found in LRU
+            int index = static_cast<int>(lru_it - markov_LRU.begin());
+            markov_update_lru(index);
+        } else {                                                                                                            // if key is NOT found in LRU
+            if (markov_LRU_front < MT_limit - 1) {                                                                          // if LRU is not full
+                if ((int)markov_LRU.size() <= markov_LRU_front) {                                                           // if LRU is smaller than LRU front
+                    markov_LRU.resize(markov_LRU_front + 1);
+                }
+                markov_LRU[markov_LRU_front] = val_it;
+                markov_LRU_front++;
+            } else {                                                                                                        // if LRU is full we evict the LRU and shift the rest
+                auto toDel = markov_evict_lru();                                                                            // LRU made of iterators 
+                for (auto &outer_pair : markov_table) {                                                                     // find the key in the table 
+                    auto &inner_map = outer_pair.second;
+                    for (auto it_inner = inner_map.begin(); it_inner != inner_map.end();) {
+                        if (it_inner == toDel) {
+                            it_inner = inner_map.erase(it_inner);
+                            break;
+                        } else {
+                            ++it_inner;
+                        }
+                    }
+                }
+                for (auto it_outer = markov_table.begin(); it_outer != markov_table.end();) {
+                    if (it_outer->second.empty()) {
+                        key_prev_block.erase(it_outer->first); // Clean stride tracking
+                        it_outer = markov_table.erase(it_outer);
+                    } else {
+                        ++it_outer;
+                    }
+                }
+                if (markov_LRU_front > 0 && markov_LRU.size() > markov_LRU_front - 1) {
+                    markov_LRU[markov_LRU_front - 1] = val_it;
+                }
+            }
+        }
+        return top_predictions;
+    }
+
+    vector<int64_t> markov_prefetcher_TopK_Thresh(int64_t lookup_key, IteratorType key_it, unordered_map<int64_t, int>::iterator val_it) {
+        vector<int64_t> top_predictions; // init Pf collector
+
+        auto it = markov_table.find(lookup_key);                                            // find the key in the table
+        if (it != markov_table.end()) {                                                     // if key is found
+            auto &next_blocks = it->second;    
+            vector<pair<int64_t, int>> predictions(next_blocks.begin(), next_blocks.end()); // convert {Search Key: Value : Count} into vector with [Value:Count] for a given key
+            sort(predictions.begin(), predictions.end(),                                    // sort the vector by count 
+                      [](pair<int64_t, int> &a, pair<int64_t, int> &b) {
+                          return a.second > b.second;
+                      });
+            int total_count = accumulate(predictions.begin(), predictions.end(), 0,         // sum the count of all predictions and use for confidence
+                [](int sum, pair<int64_t, int>& p) {
+                    return sum + p.second;
+                });
+            for (auto &prediction : predictions) {                                          // add predictions to Pf collector if confidence is above threshold (i.e. given Pf occured >Threshold% of the time)
+                if ((static_cast<double>(prediction.second) * 100 / total_count) >= config_ptr->percent_threshold) {    
+                    top_predictions.push_back(prediction.first);
+                } else {
+                    break;
+                }
+            }
+        }
+        
+        auto lru_it = find(markov_LRU.begin(), markov_LRU.begin() + min(markov_LRU_front, (int)markov_LRU.size()), val_it); // update LRU 
+        if (lru_it != markov_LRU.begin() + min(markov_LRU_front, (int)markov_LRU.size())) {                                 // if key is found in LRU
+            int index = static_cast<int>(lru_it - markov_LRU.begin());
+            markov_update_lru(index);
+        } else {                                                                                                            // if key is NOT found in LRU
+            if (markov_LRU_front < MT_limit - 1) {                                                                          // if LRU is not full
+                if ((int)markov_LRU.size() <= markov_LRU_front) {                                                           // if LRU is smaller than LRU front
+                    markov_LRU.resize(markov_LRU_front + 1);
+                }
+                markov_LRU[markov_LRU_front] = val_it;
+                markov_LRU_front++;
+            } else {                                                                                                        // if LRU is full we evict the LRU and shift the rest
+                auto toDel = markov_evict_lru();                                                                            // LRU made of iterators 
+                for (auto &outer_pair : markov_table) {                                                                     // find the key in the table 
+                    auto &inner_map = outer_pair.second;
+                    for (auto it_inner = inner_map.begin(); it_inner != inner_map.end();) {
+                        if (it_inner == toDel) {
+                            it_inner = inner_map.erase(it_inner);
+                            break;
+                        } else {
+                            ++it_inner;
+                        }
+                    }
+                }
+                for (auto it_outer = markov_table.begin(); it_outer != markov_table.end();) {
+                    if (it_outer->second.empty()) {
+                        key_prev_block.erase(it_outer->first); // Clean stride tracking
+                        it_outer = markov_table.erase(it_outer);
+                    } else {
+                        ++it_outer;
+                    }
+                }
+                if (markov_LRU_front > 0 && markov_LRU.size() > markov_LRU_front - 1) {
+                    markov_LRU[markov_LRU_front - 1] = val_it;
+                }
+            }
+        }
+        return top_predictions;
+    }    
+};
+
+
+// IP tracker - EXACT as original
+class IP_TRACKER {
+  public:
+    uint64_t ip;
+    uint64_t last_cl_addr;
+    int64_t last_stride;
+    uint32_t lru;
+
+    IP_TRACKER () {
+        ip = 0;
+        last_cl_addr = 0;
+        last_stride = 0;
+        lru = 0;
+    };
+};
+
+IP_TRACKER trackers[IP_TRACKER_COUNT];
+
+// Global instances
+IDMM markov_ip_stride;
+IDMM markov_prefetcher1;
+IDMM markov_prefetcher2;
+IDMM markov_prefetcher3;
+IDMM markov_prefetcher4;
+IDMM markov_prefetcher5;
+IDMM markov_prefetcher6;
+IDMM markov_prefetcher7;
+IDMM markov_prefetcher8;
+
+
+
+void CACHE::l2c_prefetcher_initialize() {
+    // mt1_config.lru_size=64; mt1_config.tracking_max=63; mt1_config.tracking_min=32; mt1_config.percent_threshold=40; mt1_config.prefetcher_id=1;
+    // mt1_config.tracking_key="ip"; mt1_config.tracking_value="delta_block";
+    
+    // mt2_config.lru_size=128; mt2_config.tracking_max=32; mt2_config.tracking_min=16; mt2_config.percent_threshold=30; mt2_config.prefetcher_id=2;
+    // mt2_config.tracking_key="ip"; mt2_config.tracking_value="delta_block";
+    
+    // mt3_config.lru_size=320; mt3_config.tracking_max=16; mt3_config.tracking_min=8; mt3_config.percent_threshold=25; mt3_config.prefetcher_id=3;
+    // mt3_config.tracking_key="ip"; mt3_config.tracking_value="delta_block";
+    
+    // mt4_config.lru_size=512; mt4_config.tracking_max=8; mt4_config.tracking_min=0; mt4_config.percent_threshold=20; mt4_config.prefetcher_id=4;
+    // mt4_config.tracking_key="ip"; mt4_config.tracking_value="delta_block";
+   
+    // percentage is a entry count /total count of all entries ratio * 100 
+    mt_ip_stride.lru_size=320; mt_ip_stride.tracking_max=63; mt_ip_stride.tracking_min=1; mt_ip_stride.percent_threshold=1; mt_ip_stride.prefetcher_id=0;
+    mt_ip_stride.tracking_key="ip"; mt_ip_stride.tracking_value="stride_block";
+    mt_ip_stride.IP_BITS = 16; mt_ip_stride.IP_MODULO_BOUND = 2048;  
+    mt_ip_stride.candidate_selection_policy = "TopK_Thresh"; 
+    // mt_ip_stride.candidate_selection_policy = "Elbow";
+
+    mt1_config.lru_size=256; mt1_config.tracking_max=63; mt1_config.tracking_min=32; mt1_config.percent_threshold=40; mt1_config.prefetcher_id=1;
+    mt1_config.tracking_key="ip"; mt1_config.tracking_value="delta_block";
+    mt1_config.IP_BITS = 16; mt1_config.IP_MODULO_BOUND = 2048; 
+    mt1_config.candidate_selection_policy = "TopK_Thresh";
+    // mt1_config.candidate_selection_policy = "Elbow";
+    
+    mt2_config.lru_size=256; mt2_config.tracking_max=32; mt2_config.tracking_min=16; mt2_config.percent_threshold=30; mt2_config.prefetcher_id=2;
+    mt2_config.tracking_key="ip"; mt2_config.tracking_value="delta_block";
+    mt2_config.IP_BITS = 16; mt2_config.IP_MODULO_BOUND = 2048; 
+    mt2_config.candidate_selection_policy = "TopK_Thresh";
+    // mt2_config.candidate_selection_policy = "Elbow";
+    
+    mt3_config.lru_size=256; mt3_config.tracking_max=16; mt3_config.tracking_min=8; mt3_config.percent_threshold=25; mt3_config.prefetcher_id=3;
+    mt3_config.tracking_key="ip"; mt3_config.tracking_value="delta_block";
+    mt3_config.IP_BITS = 16; mt3_config.IP_MODULO_BOUND = 2048; 
+    mt3_config.candidate_selection_policy = "TopK_Thresh";
+    // mt3_config.candidate_selection_policy = "Elbow";
+
+    mt4_config.lru_size=256; mt4_config.tracking_max=8; mt4_config.tracking_min=0; mt4_config.percent_threshold=20; mt4_config.prefetcher_id=4;
+    mt4_config.tracking_key="ip"; mt4_config.tracking_value="delta_block";
+    mt4_config.IP_BITS = 16; mt4_config.IP_MODULO_BOUND = 2048; 
+    mt4_config.candidate_selection_policy = "TopK_Thresh";
+    // mt4_config.candidate_selection_policy = "Elbow";
+    
+    // mt1_config.lru_size=256; mt1_config.tracking_max=63; mt1_config.tracking_min=32; mt1_config.percent_threshold=5; mt1_config.prefetcher_id=1;
+    // mt1_config.tracking_key="ip"; mt1_config.tracking_value="delta_block";
+    
+    // mt2_config.lru_size=256; mt2_config.tracking_max=32; mt2_config.tracking_min=1; mt2_config.percent_threshold=5; mt2_config.prefetcher_id=2;
+    // mt2_config.tracking_key="ip"; mt2_config.tracking_value="delta_block";
+    
+    // mt3_config.lru_size=256; mt3_config.tracking_max=63; mt3_config.tracking_min=32; mt3_config.percent_threshold=5; mt3_config.prefetcher_id=3;
+    // mt3_config.tracking_key="delta_ip"; mt3_config.tracking_value="delta_block";
+    
+    // mt4_config.lru_size=256; mt4_config.tracking_max=32; mt4_config.tracking_min=1; mt4_config.percent_threshold=5; mt4_config.prefetcher_id=4;
+    // mt4_config.tracking_key="delta_ip"; mt4_config.tracking_value="delta_block";
+
+    // mt5_config.lru_size=128; mt5_config.tracking_max=64; mt5_config.tracking_min=1; mt5_config.percent_threshold=0; mt5_config.prefetcher_id=5;
+    // mt5_config.tracking_key="delta_ip"; mt5_config.tracking_value="delta_ip";
+
+    
+    markov_ip_stride.set_config(&mt_ip_stride);
+    markov_prefetcher1.set_config(&mt1_config);
+    markov_prefetcher2.set_config(&mt2_config);
+    markov_prefetcher3.set_config(&mt3_config);
+    markov_prefetcher4.set_config(&mt4_config);
+    markov_prefetcher5.set_config(&mt5_config);
+
+    cout << "MT1: " << "Size: " << mt1_config.lru_size << " TMAX: " << mt1_config.tracking_max << " TMIN: " << mt1_config.tracking_min << " MT1PTHRESH: " << mt1_config.percent_threshold << endl;
+    cout << "MT2: " << "Size: " << mt2_config.lru_size << " TMAX: " << mt2_config.tracking_max << " TMIN: " << mt2_config.tracking_min << " MT2PTHRESH: " << mt2_config.percent_threshold << endl;
+    cout << "MT3: " << "Size: " << mt3_config.lru_size << " TMAX: " << mt3_config.tracking_max << " TMIN: " << mt3_config.tracking_min << " MT3PTHRESH: " << mt3_config.percent_threshold << endl;
+    cout << "MT4: " << "Size: " << mt4_config.lru_size << " TMAX: " << mt4_config.tracking_max << " TMIN: " << mt4_config.tracking_min << " MT4PTHRESH: " << mt4_config.percent_threshold << endl;
+
+    cout << "Stride Size: " << IP_TRACKER_COUNT << " Prefetch Degree: " << PREFETCH_DEGREE << endl<< endl; 
+    cout << "CPU " << cpu << " L2C prefetcher" << endl;
+    
+    for (int i=0; i<IP_TRACKER_COUNT; i++)
+        trackers[i].lru = i;
+
+    prefetcher_count[1]=0;
+    prefetcher_count[2]=0;
+    prefetcher_count[3]=0;
+    prefetcher_count[4]=0;
+    prefetcher_count[5]=0;
+    prefetcher_count[6]=0;
+    prefetcher_count[7]=0;
+    prefetcher_count[8]=0;
+    cout << "now  : DUMMY FLAG V11" << endl;
+    isPfActive[1] = true;
+    isPfActive[2] = true; 
+    isPfActive[3] = true;
+    isPfActive[4] = true;
+}
+
+#include <vector>
+#include <stdexcept>
+#include <cstdint>
+struct track_module_hits {
+    // Constants
+    uint64_t ip;
+
+    // static constexpr uint8_t PAGE_BITS = 16;
+    // static constexpr uint8_t BLOCK_BITS = 6;
+    // static constexpr uint8_t PF_HISTORY_SIZE = 64;
+    // // static constexpr uint8_t PF_HIT_BITS = 16;  // 10 bits page + 6 bits block
+    // static constexpr uint8_t WINDOW_SIZE = 4;   
+    // static constexpr uint8_t NUM_ACCESSES_PER_WINDOW = 32;
+    // static constexpr uint8_t BIT_LEN = 5; // MUST BE log 2 of NUM_ACCESSES_PER_WINDOW
+    // static constexpr uint8_t MAX_INT_PACKED_LIMIT = (1 << BIT_LEN) - 1;  // 63
+    // BEST ISH FOR GPT 256 TRACE 
+    static constexpr uint8_t PAGE_BITS = 16;
+    static constexpr uint8_t BLOCK_BITS = 6;
+    static constexpr uint8_t PF_HISTORY_SIZE = 64;
+    static constexpr uint8_t PF_HIT_BITS = 16;  // 10 bits page + 6 bits block
+    static constexpr uint8_t WINDOW_SIZE =16;   
+    static constexpr uint8_t NUM_ACCESSES_PER_WINDOW = 32;
+    static constexpr uint8_t BIT_LEN = 5; // MUST BE log 2 of NUM_ACCESSES_PER_WINDOW
+    static constexpr uint8_t MAX_INT_PACKED_LIMIT = (1 << BIT_LEN) - 1;  // 63
+    
+    // Configurable effectiveness level boundaries
+    int8_t level_0_max = 0;   // Level 0: 0 to level_0_max hits
+    int8_t level_1_max = 1;   // Level 1: (level_0_max+1) to level_1_max hits  
+    int8_t level_2_max = 2;  // Level 2: (level_1_max+1) to level_2_max hits
+    // Level 3: (level_2_max+1)+ hits
+    
+    // Data members
+    uint32_t pf_issue_history[PF_HISTORY_SIZE];  // FIFO prefetch history
+    uint8_t pf_write_ptr = 0;                    // FIFO write pointer
+    uint8_t current_hit_count = 0;               // Hits in current window
+    uint8_t access_counter = 0;                  // Accesses in current window  
+    uint8_t window_history[WINDOW_SIZE];         // Window effectiveness history
+    uint8_t window_ptr = 0;                      // Current window position
+    bool module_active[PF_HISTORY_SIZE] = {true};
+
+        
+    // Configure effectiveness level boundaries for testing
+    void set_effectiveness_levels(uint8_t max_0, uint8_t max_1, uint8_t max_2) {
+        level_0_max = max_0;
+        level_1_max = max_1; 
+        level_2_max = max_2;
+        // Level 3 is automatically anything above max_2
+    }
+
+    // FIXED: MSHR-aware prefetch decision - BOOTSTRAP ENABLED
+    bool get_pf_state(int MSHR_SIZE, int MSHR_occupancy) {
+        uint8_t current_mask = get_currentMask();
+        uint8_t available_mshr = MSHR_SIZE - MSHR_occupancy;
+        
+        // FIXED: Allow bootstrapping with VERY_LOW effectiveness
+        uint8_t required_threshold = 0;  // Default: allow VERY_LOW (0)
+        if (available_mshr <= MSHR_SIZE/8) {
+            required_threshold = 2;      // Need HIGH effectiveness
+        } else if (available_mshr <= MSHR_SIZE/4) {
+            required_threshold = 1;      // Need MEDIUM effectiveness
+        } else if (available_mshr <= MSHR_SIZE) {
+            required_threshold = 0;      // Need LOW effectiveness
+        }
+        
+        return current_mask >= required_threshold;
+    }
+    
+    // Shadow hit promotion - check for false negatives
+    void shadow_hit_promotion(int encoded_access_block, bool hit) {
+        if (hit){
+            for (int i = 0; i < PF_HISTORY_SIZE; i++) {
+                if (pf_issue_history[i] == encoded_access_block) {
+                    if (window_history[window_ptr] == 0) {
+                        window_history[window_ptr] = 1;  // Promote from VERY_LOW to LOW
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // Main processing method
+    void operate(uint64_t curr_ip, uint64_t block, bool hit, const std::vector<uint64_t>& issue_vector) {
+        // Increment access counter
+        ip=curr_ip;
+        access_counter++;
+        
+        // Check for window boundary
+        if (access_counter >= NUM_ACCESSES_PER_WINDOW) {
+            // Encode current hit count into effectiveness using configurable boundaries
+            uint8_t effectiveness = 0;
+            if (current_hit_count <= level_0_max) {
+                effectiveness = 0;  // Level 0
+            } else if (current_hit_count <= level_1_max) {
+                effectiveness = 1;  // Level 1
+            } else if (current_hit_count <= level_2_max) {
+                effectiveness = 2;  // Level 2
+            } else {
+                effectiveness = 3;  // Level 3
+            }
+            
+            // Set the mask for current window
+            setWindowMask(effectiveness);
+            
+            // Shift to next window and reset counters
+            shiftWindow();
+        }
+        
+        // FIRST: Check for shadow hit promotion
+        int encodedAccessBlock = encode_block(block);
+        shadow_hit_promotion(encodedAccessBlock, hit);
+        
+        // Process the current access
+        if (hit) {
+            for (int i = 0; i < PF_HISTORY_SIZE; i++) {
+                if (pf_issue_history[i] == encodedAccessBlock) {
+                    current_hit_count++;
+                    break;
+                }
+            }
+            
+            if (current_hit_count > MAX_INT_PACKED_LIMIT) {
+                throw std::runtime_error("[Pf ERROR] Pf module accuracy bit packing overflow occured line " + 
+                                       std::to_string(__LINE__));
+            }
+        }
+        
+        // Add new prefetch issues
+        addNewIssues(issue_vector);
+    }
+    
+    // Add new prefetch issues to FIFO
+    void addNewIssues(const std::vector<uint64_t>& issue_vector) {
+        for (uint64_t block : issue_vector) {
+            uint16_t encoded = encode_block(block);
+            FIFO(encoded);
+        }
+    }
+    
+    // FIXED: Encode block for cache line addresses
+    uint32_t encode_block(uint64_t block) {
+        // For cache line addresses: 64 cache lines per 4KB page
+        uint64_t page_number = block >> 6;  // FIXED: 6 bits for 64 cache lines
+        
+        static constexpr uint64_t fibonacci_multiplier = 11400714819323198486ULL;
+        // uint64_t hash_result = page_number * fibonacci_multiplier;
+        // uint64_t page_hash = (hash_result >> (64-PAGE_BITS));
+        
+        // uint64_t hash_result = page_number ^ ip ;
+        uint64_t hash_result = (page_number >> 1) ^ (page_number >> 4)  ;
+        // uint64_t page_hash = (hash_result >> (64-PAGE_BITS));
+        uint64_t page_hash = hash_result & ((1ULL << PAGE_BITS) - 1);
+        
+        uint64_t max_page_value = (1ULL << PAGE_BITS) - 1;
+        if (page_hash > max_page_value) {
+            throw std::runtime_error("Page hash exceeds PAGE_BITS limit at line " + std::to_string(__LINE__));
+        }
+        // Block offset within page (6 bits)  
+        uint64_t page_start = page_number << LOG2_BLOCK_SIZE;  // Page start address
+        uint64_t block_offset = block - page_start;  // Offset within the page
+        
+        uint32_t combined = (page_hash << 6) | block_offset;
+        constexpr uint32_t MAX_COMBINED = (1u << (PAGE_BITS + BLOCK_BITS)) - 1;
+        if ((combined > MAX_COMBINED)) {
+            throw std::overflow_error("Combined hash exceeds allocated bits");
+        }
+        return combined;
+    }
+    
+    // O(1) FIFO insertion
+    void FIFO(uint32_t encoded_block) {
+        pf_issue_history[pf_write_ptr] = encoded_block;
+        pf_write_ptr = (pf_write_ptr + 1) % PF_HISTORY_SIZE;
+    }
+    
+    // Set mask value in window array
+    void setWindowMask(uint8_t mask_value) {
+        window_history[window_ptr] = mask_value;
+    }
+    
+    // Shift to next window and reset counters
+    void shiftWindow() {
+        current_hit_count = 0;
+        access_counter = 1;
+        window_ptr = (window_ptr + 1) % WINDOW_SIZE;
+    }
+    
+    // Get current window mask value
+    int get_currentMask() {
+        return window_history[window_ptr];
+    }
+    
+    // Calculate total hit rate across all windows using configurable boundaries
+    float get_TotalHitRate() {
+        uint32_t total_estimated_hits = 0;
+        uint32_t total_windows = 0;
+        
+        for (int i = 0; i < WINDOW_SIZE; i++) {
+            uint8_t effectiveness = window_history[i];
+            
+            uint32_t estimated_hits = 0;
+            if (effectiveness == 0) {
+                estimated_hits = level_0_max;  // Conservative estimate for level 0 range
+            } else if (effectiveness == 1) { 
+                estimated_hits = (level_0_max + 1 + level_1_max);  // Midpoint of level 1 range
+            } else if (effectiveness == 2) {
+                estimated_hits = (level_1_max + 1 + level_2_max);  // Midpoint of level 2 range
+            } else if (effectiveness == 3) {
+                estimated_hits = level_2_max + 5;  // Conservative estimate for level 3 range
+            }
+            
+            total_estimated_hits += estimated_hits;
+            total_windows++;
+        }
+        
+        if (total_windows == 0) return 0.0f;
+        
+        uint32_t total_accesses = total_windows * NUM_ACCESSES_PER_WINDOW;
+        return (float)total_estimated_hits / total_accesses;
+    }
+};
+
+
+track_module_hits pf_module_trackers[32];
+double tracker_avg_tracker[32] = {0};
+int tracker_i = 0;
+bool module_hit = false;
+
+uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint32_t metadata_in) {
+    // Cache hit tracking - EXACT as original
+    if (cache_hit) {
+        for (auto it = currentRound_prefetches.begin(); it != currentRound_prefetches.end(); ++it) {
+            if (it->first == (addr >> LOG2_BLOCK_SIZE << LOG2_BLOCK_SIZE)) {
+                nxtH_cnt[it->second]++;
+            }
+        }
+        tH_cnt++;
+    }
+    currentRound_prefetches.clear();
+
+    // IP stride average tracking - EXACT as original
+    // nxtAddrHit_IP_Stride_avg = (nxtAddrHit_IP_Stride_avg*nxtAddrHit_IP_Stride_avg_cnt + pf_nxtH_acc[0])/(++nxtAddrHit_IP_Stride_avg_cnt);
+    
+    // // Cache initialization - EXACT as original
+    if(NUM_CACHELINES == 0){
+        uint64_t cache_size = (L2C_SET*L2C_WAY*BLOCK_SIZE)/1024;
+        cout << "CPU " << cpu << " L2C prefetcher initialized" << endl;
+        cout << "\n\nCache Size: " << cache_size << endl;
+        cout << "number of cache lines: " << L2C_SET*L2C_WAY << endl;
+        NUM_CACHELINES = L2C_SET*L2C_WAY;
+    }
+    
+    uint64_t alignedAddr = addr >> LOG2_BLOCK_SIZE;
+    shared_access_data.init_process_access(alignedAddr, ip); 
+    uint16_t current_encoded = pf_module_trackers[0].encode_block(alignedAddr);
+    // NEW IDMM REQUIRES:
+        // 1. NEW GLOBAL IDMM OBJECT
+        // 2. NEW CONFIG OF NEW OBJ INSIDE Pf INITIALIZE 
+        // 3. SET CONFIG FOR IDMM OBJECT AT END OF Pf INITIALIZE
+
+ 
+    // PRE PROCESSING DONE!!! 
+
+// MARKOV IP STRIDE PREFETCHER ------------------------------------------------------------------------------------------------------------             MARKOV IP STRIDE PREFETCHER
+
+    vector<int64_t> stride_predictions = markov_ip_stride.operate(shared_access_data);
+    
+    module_hit = false;
+    for (int i = 0; i < pf_module_trackers[tracker_i].PF_HISTORY_SIZE; i++) {
+        if (pf_module_trackers[tracker_i].pf_issue_history[i] == current_encoded) {
+            module_hit = true;
+            break;
+        }
+    }
+    
+    vector<uint64_t> empty_vector;
+    pf_module_trackers[tracker_i].operate(ip, alignedAddr, module_hit, empty_vector);
+    
+    if (DGB_ALWAYS_PF || (pf_module_trackers[tracker_i].get_pf_state(MSHR.SIZE, MSHR.occupancy) && !stride_predictions.empty())) {
+        for (auto stride : stride_predictions) {
+            if (stride == 0) continue;
+            
+            int prefetchDegree;
+            if (MSHR.occupancy < (1*MSHR.SIZE)/8)
+                prefetchDegree = PREFETCH_DEGREE;
+            else if (MSHR.occupancy < (1*MSHR.SIZE)/5)
+                prefetchDegree = PREFETCH_DEGREE/2;
+            else if (MSHR.occupancy < (1*MSHR.SIZE)/2)
+                prefetchDegree = PREFETCH_DEGREE/5;
+            else 
+                prefetchDegree = PREFETCH_DEGREE/4;
+
+            if (pf_nxtH_acc[0]-nxtAddrHit_IP_Stride_avg>0.05){
+                prefetchDegree +=4;
+            }
+
+            flagged = 0;
+            for (int i=0; i<prefetchDegree; i++) {
+                if (flagged == 0){
+                    pf_guess_cnt[IPSTR_ID]++;
+                    flagged = 1;
+                }
+
+                uint64_t pf_addr = (alignedAddr + (stride*(i+1))) << LOG2_BLOCK_SIZE;
+                uint64_t pf_block = alignedAddr + (stride*(i+1));
+                metadata_in = 1; 
+                
+                if (MSHR.occupancy < ((MSHR.SIZE/4)*3) || pf_nxtH_acc[IPSTR_ID] > 0.01){
+                    prefetch_line(ip, addr, pf_addr, FILL_L2, metadata_in);
+                    uint16_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                    pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                }
+                else{
+                    prefetch_line(ip, addr, pf_addr, FILL_LLC, metadata_in);
+                    uint16_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                    pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                }
+                metadata_in = 0;
+                currentRound_prefetches.push_back(make_pair(pf_addr, IPSTR_ID));
+                prefetcher_count[2]++;
+            }
+        }
+    }
+    
+    tracker_avg_tracker[tracker_i] += pf_module_trackers[tracker_i].get_TotalHitRate();
+    if (DBG_Pf_TRACKER_PRINT && cnt % TRACKER_STATS_PRINT_PERIOD == 0){
+        cout << "MODULE TRACKER: " << setw(8) << tracker_i 
+             << " WINDOW HIT RATE: " << setw(8) << fixed << setprecision(8) 
+             << tracker_avg_tracker[tracker_i]/TRACKER_STATS_PRINT_PERIOD << " STATE: "<< setw(10) << pf_module_trackers[tracker_i].get_currentMask() << endl;
+        tracker_avg_tracker[tracker_i] = 0; 
+    }
+    tracker_i++;
+
+// MARKOV IP STRIDE PREFETCHER ------------------------------------------------------------------------------------------------------------             MARKOV IP STRIDE PREFETCHER
+
+// IDMM: MT1 MODULE ----------------------------------------------------------------------------------------------------------------------------        IDMM: MT1 MODULE    
+    pf_cnt = 0;
+    vector<int64_t> markov_predictions1 = markov_prefetcher1.operate(shared_access_data);
+    
+    module_hit = false;
+    for (int i = 0; i < pf_module_trackers[tracker_i].PF_HISTORY_SIZE; i++) {
+        if (pf_module_trackers[tracker_i].pf_issue_history[i] == current_encoded) {
+            module_hit = true;
+            break;
+        }
+    }
+    pf_module_trackers[tracker_i].operate(ip, alignedAddr, module_hit, empty_vector);
+    
+    if (DGB_ALWAYS_PF || (pf_module_trackers[tracker_i].get_pf_state(MSHR.SIZE, MSHR.occupancy) && !markov_predictions1.empty() ) ) {
+        flagged = 0;
+        for (auto offset : markov_predictions1) {
+            if (flagged == 0){
+                pf_guess_cnt[mt1_config.prefetcher_id]++;
+                flagged = 1;
+            }
+            
+            if (MSHR.occupancy < (MSHR.SIZE/2)){    
+                if (isPfActive[mt1_config.prefetcher_id]==true){
+                    for (int i = 1; i <= MT_DEGREE; i++){
+                        
+                        prefetcher_count[3]++;
+                        currentRound_prefetches.push_back(make_pair(pf_addr, mt1_config.prefetcher_id));
+                        pf_cnt++;
+
+                        pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+                        uint64_t pf_block = alignedAddr - (offset*i);
+                        if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+                            if (PQ.occupancy < PQ.SIZE){
+                                prefetch_line(ip, addr, (pf_addr), FILL_L2, metadata_in);
+                                uint16_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                                pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                            }
+                            else{
+                                prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+                                uint16_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                                pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                            }
+                        }
+                    }
+                }
+                currentRound_prefetches.push_back(make_pair(pf_addr, mt1_config.prefetcher_id));
+            }
+            else{
+                if (isPfActive[mt1_config.prefetcher_id]==true){
+                    for (int i = 1; i <= MT_DEGREE; i++){
+                        prefetcher_count[3]++;
+                        currentRound_prefetches.push_back(make_pair(pf_addr, mt1_config.prefetcher_id));
+                        pf_cnt++;
+                        
+                        pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+                        uint64_t pf_block = alignedAddr - (offset*i);
+                        if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+                            prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+                            uint16_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                            pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                        }
+                    }
+                }
+                
+            }  
+        }
+    }
+    
+    tracker_avg_tracker[tracker_i] += pf_module_trackers[tracker_i].get_TotalHitRate();
+    if (DBG_Pf_TRACKER_PRINT && cnt % TRACKER_STATS_PRINT_PERIOD == 0){
+        cout << "MODULE TRACKER: " << setw(8) << tracker_i 
+             << " WINDOW HIT RATE: " << setw(8) << fixed << setprecision(8) 
+             << tracker_avg_tracker[tracker_i]/TRACKER_STATS_PRINT_PERIOD << " STATE: "<< setw(10) << pf_module_trackers[tracker_i].get_currentMask() << endl;
+        tracker_avg_tracker[tracker_i] = 0; 
+    }
+    tracker_i++;
+// IDMM: MT1 MODULE ----------------------------------------------------------------------------------------------------------------------------        IDMM: MT1 MODULE
+
+// IDMM: MT2 MODULE ----------------------------------------------------------------------------------------------------------------------------        IDMM: MT2 MODULE
+    vector<int64_t> markov_predictions2 = markov_prefetcher2.operate(shared_access_data);
+    
+    module_hit = false;
+    for (int i = 0; i < pf_module_trackers[tracker_i].PF_HISTORY_SIZE; i++) {
+        if (pf_module_trackers[tracker_i].pf_issue_history[i] == current_encoded) {
+            module_hit = true;
+            break;
+        }
+    }
+    pf_module_trackers[tracker_i].operate(ip, alignedAddr, module_hit, empty_vector);
+    
+    if (DGB_ALWAYS_PF || (pf_module_trackers[tracker_i].get_pf_state(MSHR.SIZE, MSHR.occupancy) && !markov_predictions2.empty() ) ) {
+        flagged = 0;
+        pf_cnt = 0;
+        for (auto offset : markov_predictions2) {
+            if (flagged == 0){
+                pf_guess_cnt[mt2_config.prefetcher_id]++;
+                flagged = 1;
+            }
+            
+            if (MSHR.occupancy < (MSHR.SIZE/2) ){   
+                if (isPfActive[mt2_config.prefetcher_id]==true){ 
+                        for (int i = 1; i <= MT_DEGREE; i++){
+                            prefetcher_count[4]++;
+                            currentRound_prefetches.push_back(make_pair(pf_addr, mt2_config.prefetcher_id));
+                            pf_cnt++;
+
+                            pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+                            uint64_t pf_block = alignedAddr - (offset*i);
+                            if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+                                if (PQ.occupancy < PQ.SIZE){
+                                    prefetch_line(ip, addr, (pf_addr), FILL_L2, metadata_in);
+                                    uint16_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                                    pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                                }
+                                else{
+                                    prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+                                    uint16_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                                    pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                                }
+                            }
+                        }
+                }
+                
+            }
+            else{
+                if (isPfActive[mt2_config.prefetcher_id]==true){
+                    prefetcher_count[4]++;
+                    for (int i = 1; i <= MT_DEGREE; i++){
+                        prefetcher_count[4]++;
+                        currentRound_prefetches.push_back(make_pair(pf_addr, mt2_config.prefetcher_id));
+                        pf_cnt++;
+                        
+                        pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+                        uint64_t pf_block = alignedAddr - (offset*i);
+                        if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+                            prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+                            uint16_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                            pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                        }
+                    }
+                }
+            }  
+        }
+    }
+    
+    tracker_avg_tracker[tracker_i] += pf_module_trackers[tracker_i].get_TotalHitRate();
+    if (DBG_Pf_TRACKER_PRINT && cnt % TRACKER_STATS_PRINT_PERIOD == 0){
+        cout << "MODULE TRACKER: " << setw(8) << tracker_i 
+             << " WINDOW HIT RATE: " << setw(8) << fixed << setprecision(8) 
+             << tracker_avg_tracker[tracker_i]/TRACKER_STATS_PRINT_PERIOD << " STATE: "<< setw(10) << pf_module_trackers[tracker_i].get_currentMask() << endl;
+        tracker_avg_tracker[tracker_i] = 0; 
+    }
+    tracker_i++;
+// IDMM: MT2 MODULE ----------------------------------------------------------------------------------------------------------------------------        IDMM: MT2 MODULE
+
+// IDMM: MT3 MODULE ----------------------------------------------------------------------------------------------------------------------------        IDMM: MT3 MODULE
+    pf_cnt = 0;
+    vector<int64_t> markov_predictions3 = markov_prefetcher3.operate(shared_access_data);
+    
+    module_hit = false;
+    for (int i = 0; i < pf_module_trackers[tracker_i].PF_HISTORY_SIZE; i++) {
+        if (pf_module_trackers[tracker_i].pf_issue_history[i] == current_encoded) {
+            module_hit = true;
+            break;
+        }
+    }
+    pf_module_trackers[tracker_i].operate(ip, alignedAddr, module_hit, empty_vector);
+    
+    if (DGB_ALWAYS_PF || (pf_module_trackers[tracker_i].get_pf_state(MSHR.SIZE, MSHR.occupancy) && !markov_predictions3.empty() ) ) {
+        flagged = 0;
+        for (auto offset : markov_predictions3) {
+            if (flagged == 0){
+                pf_guess_cnt[mt3_config.prefetcher_id]++;
+                flagged = 1;
+            }
+
+           if (MSHR.occupancy < (MSHR.SIZE/2)){  
+               if (isPfActive[mt3_config.prefetcher_id]==true){
+                    for (int i = 1; i <= MT_DEGREE; i++){
+                        prefetcher_count[5]++;
+                        currentRound_prefetches.push_back(make_pair(pf_addr, mt3_config.prefetcher_id));
+                        pf_cnt++;
+
+                        pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+                        uint64_t pf_block = alignedAddr - (offset*i);
+                        if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+                            if (PQ.occupancy < PQ.SIZE){
+                                prefetch_line(ip, addr, (pf_addr), FILL_L2, metadata_in);
+                                uint16_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                                pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                            }
+                            else{
+                                prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+                                uint16_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                                pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                            }
+                        }
+                    }
+               }  
+           }
+           else{
+               if (isPfActive[mt3_config.prefetcher_id]==true){
+               prefetcher_count[5]++;
+                for (int i = 1; i <= MT_DEGREE; i++){
+                        prefetcher_count[5]++;
+                        currentRound_prefetches.push_back(make_pair(pf_addr, mt3_config.prefetcher_id));
+                        pf_cnt++;
+
+                    pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+                    uint64_t pf_block = alignedAddr - (offset*i);
+                    if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+                            prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+                            uint16_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                            pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                    }
+                }
+               }
+           }  
+       }
+    }
+    
+    tracker_avg_tracker[tracker_i] += pf_module_trackers[tracker_i].get_TotalHitRate();
+    if (DBG_Pf_TRACKER_PRINT && cnt % TRACKER_STATS_PRINT_PERIOD == 0){
+        cout << "MODULE TRACKER: " << setw(8) << tracker_i 
+             << " WINDOW HIT RATE: " << setw(8) << fixed << setprecision(8) 
+             << tracker_avg_tracker[tracker_i]/TRACKER_STATS_PRINT_PERIOD << " STATE: "<< setw(10) << pf_module_trackers[tracker_i].get_currentMask() << endl;
+        tracker_avg_tracker[tracker_i] = 0; 
+    }
+    tracker_i++;
+// IDMM: MT3 MODULE ---------------------------------------------------------------------------------------------------------------------------         IDMM: MT3 MODULE
+
+// IDMM: MT4 MODULE ---------------------------------------------------------------------------------------------------------------------------         IDMM: MT4 MODULE
+   pf_cnt = 0;
+   vector<int64_t> markov_predictions4 = markov_prefetcher4.operate(shared_access_data);
+   
+    module_hit = false;
+    for (int i = 0; i < pf_module_trackers[tracker_i].PF_HISTORY_SIZE; i++) {
+        if (pf_module_trackers[tracker_i].pf_issue_history[i] == current_encoded) {
+            module_hit = true;
+            break;
+        }
+    }
+    pf_module_trackers[tracker_i].operate(ip, alignedAddr, module_hit, empty_vector);
+   
+   if (DGB_ALWAYS_PF || (pf_module_trackers[tracker_i].get_pf_state(MSHR.SIZE, MSHR.occupancy) && !markov_predictions4.empty() ) ) {
+       flagged = 0;
+       pf_cnt = 0;
+       for (auto offset : markov_predictions4) {
+           if (flagged == 0){
+               pf_guess_cnt[mt4_config.prefetcher_id]++;
+               flagged = 1;
+           }
+           
+           if (MSHR.occupancy < (MSHR.SIZE/2)){ 
+               if (isPfActive[mt4_config.prefetcher_id]==true){
+                    for (int i = 1; i <= MT_DEGREE; i++){
+                        prefetcher_count[6]++;
+                        currentRound_prefetches.push_back(make_pair(pf_addr, mt4_config.prefetcher_id));
+                        pf_cnt++;
+
+                        pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+                        uint64_t pf_block = alignedAddr - (offset*i);
+                        if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+                            if (PQ.occupancy < PQ.SIZE){
+                                prefetch_line(ip, addr, (pf_addr), FILL_L2, metadata_in);
+                                uint16_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                                pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                            }
+                            else{
+                                prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+                                uint16_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                                pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                            }
+                        }
+                    }
+               }   
+           }
+           else{
+               if (isPfActive[mt4_config.prefetcher_id]==true){
+                   for (int i = 1; i <= MT_DEGREE; i++){
+                        prefetcher_count[6]++;
+                        currentRound_prefetches.push_back(make_pair(pf_addr, mt4_config.prefetcher_id));
+                        pf_cnt++;
+
+                        pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+                        uint64_t pf_block = alignedAddr - (offset*i);
+                        if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+                            prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+                            uint16_t encoded_pf = pf_module_trackers[tracker_i].encode_block(pf_block);
+                            pf_module_trackers[tracker_i].FIFO(encoded_pf);
+                        }
+                   }
+               }
+           }  
+       }
+   }
+   
+   tracker_avg_tracker[tracker_i] += pf_module_trackers[tracker_i].get_TotalHitRate();
+   if (DBG_Pf_TRACKER_PRINT && cnt % TRACKER_STATS_PRINT_PERIOD == 0){
+       cout << "MODULE TRACKER: " << setw(8) << tracker_i 
+            << " WINDOW HIT RATE: " << setw(8) << fixed << setprecision(8) 
+             << tracker_avg_tracker[tracker_i]/TRACKER_STATS_PRINT_PERIOD << " STATE: "<< setw(10) << pf_module_trackers[tracker_i].get_currentMask() << endl;
+       tracker_avg_tracker[tracker_i] = 0; 
+   }
+   tracker_i++;
+// IDMM: MT4 MODULE --------------------------------------------------------------------------------------------------------------------------         IDMM: MT4 MODULE
+
+
+// MARKOV IP STRIDE PREFETCHER ------------------------------------------------------------------------------------------------------------             MARKOV IP STRIDE PREFETCHER
+
+    // vector<int64_t> stride_predictions = markov_ip_stride.operate(shared_access_data);
+    // // cout <<setw(3) << metadata_in ;
+    // // if zero predictions, return metadata 
+    // if (stride_predictions.empty()) {
+    //     return metadata_in;
+    // }
+
+    // for (auto stride : stride_predictions) {
+    //     if (stride == 0) continue;  // Skip zero strides
+        
+    //     // EXACT prefetch degree calculation from commented code
+    //     int prefetchDegree;
+    //     if (MSHR.occupancy < (1*MSHR.SIZE)/8)
+    //         prefetchDegree = PREFETCH_DEGREE;
+    //     else if (MSHR.occupancy < (1*MSHR.SIZE)/5)
+    //         prefetchDegree = PREFETCH_DEGREE/2;
+    //     else if (MSHR.occupancy < (1*MSHR.SIZE)/2)
+    //         prefetchDegree = PREFETCH_DEGREE/5;
+    //     else 
+    //         prefetchDegree = PREFETCH_DEGREE/4;
+
+    //     // EXACT adaptive adjustment based on accuracy
+    //     if (pf_nxtH_acc[0]-nxtAddrHit_IP_Stride_avg>0.05){
+    //         prefetchDegree +=4;
+    //     }
+
+    //     // EXACT prefetch loop from commented code
+    //     flagged = 0;
+    //     for (int i=0; i<(prefetchDegree); i++) {
+    //         if (flagged == 0){
+    //             pf_guess_cnt[IPSTR_ID]++;
+    //             flagged = 1;
+    //         }
+
+    //         uint64_t pf_addr = (alignedAddr + (stride*(i+1))) << LOG2_BLOCK_SIZE;
+    //         metadata_in = 1; 
+    //         // EXACT cache level selection from commented code
+    //         if (MSHR.occupancy < ((MSHR.SIZE/4)*3) || pf_nxtH_acc[IPSTR_ID] > 0.01){
+    //             prefetch_line(ip, addr, pf_addr, FILL_L2, metadata_in);
+    //         }
+    //         else{
+    //             prefetch_line(ip, addr, pf_addr, FILL_LLC, metadata_in);
+    //         }
+    //         metadata_in = 0; // reset metadata_in for next prefetch
+    //         currentRound_prefetches.push_back(make_pair(pf_addr, IPSTR_ID));
+    //         prefetcher_count[2]++;
+    //     }
+    // }
+// MARKOV IP STRIDE PREFETCHER ------------------------------------------------------------------------------------------------------------             MARKOV IP STRIDE PREFETCHER
+
+
+// TRADITIONAL IP STRIDE PREFETCHER ------------------------------------------------------------------------------------------------------------        TRADITIONAL IP STRIDE PREFETCHER  
+    // uint64_t cl_addr = addr >> LOG2_BLOCK_SIZE;
+
+    // // Process access data once for all Markov prefetchers
+
+    // // IP STRIDE PREFETCHER - EXACT as original
+    // int index = -1;
+    // for (index=0; index<IP_TRACKER_COUNT; index++) {
+    //     if (trackers[index].ip == ip)
+    //         break;
+    // }
+
+    // if (index == IP_TRACKER_COUNT) {
+    //     for (index=0; index<IP_TRACKER_COUNT; index++) {
+    //         if (trackers[index].lru == (IP_TRACKER_COUNT-1))
+    //             break;
+    //     }
+
+    //     trackers[index].ip = ip;
+    //     trackers[index].last_cl_addr = cl_addr;
+    //     trackers[index].last_stride = 0;
+    //     new_entry_count++;
+
+    //     for (int i=0; i<IP_TRACKER_COUNT; i++) {
+    //         if (trackers[i].lru < trackers[index].lru)
+    //             trackers[i].lru++;
+    //     }
+    //     trackers[index].lru = 0;
+    //     return metadata_in;                                                                  // REPEATED IP FILTER
+    // }
+
+    // if (index == -1)
+    //     assert(0);
+
+    // // Window stats update - EXACT as original  
+    // MSHR_win_cnt+=MSHR.occupancy;
+    // if (cnt % WINDOW == 0){
+    //     entryFrequency = (double)new_entry_count/WINDOW; 
+    //     new_entry_count = 0;
+    //     MSHR_win_cnt = 0;
+    //     print_cnt++;
+        
+    //     for (int i=0; i<nxtH_cnt.size(); i++){
+    //         if (pf_guess_cnt[i]==0){
+    //             pf_nxtH_acc[i] = -1;
+    //         }
+
+    //         pf_nxtH_acc[i] = (double)nxtH_cnt[i]/(double)WINDOW;
+    //         if (find(debugger.begin(), debugger.end(), 1) != debugger.end()){
+    //             cout << " " << i << ":" << setw(7) <<left<< (double)pf_nxtH_acc[i] << " C:"<<(isPfActive[i]?"T":"F")<<setw(3)<<pf_guess_cnt[i] <<left<<" H"<<left<<setw(2)<<(pf_nxtH_acc[i]>0.001) << " iR:"<<number_of_inRowPfInactivity[i];
+    //         }
+
+    //         if (((double)pf_nxtH_acc[i]) > (double)0.001 ){
+    //             isPfActive[i] = true;
+    //             number_of_inRowPfInactivity[i]=0;
+    //         } else {
+    //             number_of_inRowPfInactivity[i]++;
+    //             if ((number_of_inRowPfInactivity[i] == 10) || (number_of_inRowPfInactivity[i] == 7) || (number_of_inRowPfInactivity[i] >= 14) && (number_of_inRowPfInactivity[i] < 16)){
+    //                 isPfActive[i] = false;
+    //             } else {
+    //                 isPfActive[i] = true;
+    //             }
+    //         }
+    //         nxtH_cnt[i] = 0;
+    //         pf_guess_cnt[i] = 0;
+    //     }
+    //     if (find(debugger.begin(), debugger.end(), 1) != debugger.end()){
+    //         cout << " totH: " << tH_cnt/(double)WINDOW;
+    //         cout << " Avg:"<<nxtAddrHit_IP_Stride_avg <<endl;
+    //     }
+    //     nxtH_cnt[4] = tH_cnt/(double)WINDOW;
+    //     tH_cnt = 0;
+    // }
+
+    // if (print_cnt > 5){
+    //     print_cnt = 0;
+    // }
+
+    // // Stride calculation and prefetching - EXACT as original
+    // int64_t stride = 0;
+    // if (cl_addr > trackers[index].last_cl_addr)
+    //     stride = cl_addr - trackers[index].last_cl_addr;
+    // else {
+    //     stride = trackers[index].last_cl_addr - cl_addr;
+    //     stride *= -1;
+    // }
+
+    // if (stride == 0)
+    //     return metadata_in;
+
+    // if (stride == trackers[index].last_stride) {
+    //     int prefetchDegree;
+
+    //     if (MSHR.occupancy < (1*MSHR.SIZE)/8)
+    //         prefetchDegree = PREFETCH_DEGREE;
+    //     else if (MSHR.occupancy < (1*MSHR.SIZE)/5)
+    //         prefetchDegree = PREFETCH_DEGREE/2;
+    //     else if (MSHR.occupancy < (1*MSHR.SIZE)/2)
+    //         prefetchDegree = PREFETCH_DEGREE/5;
+    //     else 
+    //         prefetchDegree = PREFETCH_DEGREE/4;
+
+    //     if (pf_nxtH_acc[0]-nxtAddrHit_IP_Stride_avg>0.05){
+    //         prefetchDegree +=4;
+    //     }
+
+    //     flagged = 0;
+    //     for (int i=0; i<(prefetchDegree); i++) {
+    //         if (flagged == 0){
+    //             pf_guess_cnt[IPSTR_ID]++;
+    //             flagged = 1;
+    //         }
+
+    //         uint64_t pf_addr = (cl_addr + (stride*(i+1))) << LOG2_BLOCK_SIZE;
+                
+    //         if (MSHR.occupancy < ((MSHR.SIZE/4)*3) || pf_nxtH_acc[IPSTR_ID] > 0.01){
+    //             prefetch_line(ip, addr, pf_addr, FILL_L2, metadata_in);
+    //         }
+    //         else{
+    //             prefetch_line(ip, addr, pf_addr, FILL_LLC, metadata_in);
+    //         }
+    //         currentRound_prefetches.push_back(make_pair(pf_addr, IPSTR_ID));
+    //         prefetcher_count[2]++;
+    //     }
+    // }
+
+    // // Update IP tracker - EXACT as original
+    // trackers[index].last_cl_addr = cl_addr;
+    // trackers[index].last_stride = stride;
+    // for (int i=0; i<IP_TRACKER_COUNT; i++) {
+    //     if (trackers[i].lru < trackers[index].lru)
+    //         trackers[i].lru++;
+    // }
+    // trackers[index].lru = 0;
+
+// TRADITIONAL IP STRIDE PREFETCHER ------------------------------------------------------------------------------------------------------------        TRADITIONAL IP STRIDE PREFETCHER
+
+
+
+// MARKOV PREFETCHERS - Using shared AccessData, each with own previous state
+
+
+
+// WITHOUT USING Pf_TRACKER HISTORY 
+// // IDMM: MT1 MODULE ----------------------------------------------------------------------------------------------------------------------------        IDMM: MT1 MODULE    
+//     pf_cnt = 0;
+//     // vector<int64_t> markov_predictions1 = markov_prefetcher1.operate(shared_access_data, alignedAddr, ip, cache_hit, type);
+//     vector<int64_t> markov_predictions1 = markov_prefetcher1.operate(shared_access_data);
+//     flagged = 0;
+//     for (auto offset : markov_predictions1) {
+//         if (flagged == 0){
+//             pf_guess_cnt[mt1_config.prefetcher_id]++;
+//             flagged = 1;
+//         }
+
+        
+//         // if (pf_nxtH_acc[mt1_config.prefetcher_id] < 0.01 && pf_cnt >= 3){
+//         //     continue;
+//         // }
+//         // if (pf_nxtH_acc[mt1_config.prefetcher_id]<0.001 && pf_cnt >= 1){
+//         //     continue;
+//         // }
+        
+//         if (MSHR.occupancy < (MSHR.SIZE/2)){    
+//             if (isPfActive[mt1_config.prefetcher_id]==true){
+//                 for (int i = 1; i <= MT_DEGREE; i++){
+//                     pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+//                     if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+//                         if (PQ.occupancy < PQ.SIZE){
+//                             prefetch_line(ip, addr, (pf_addr), FILL_L2, metadata_in);
+//                         }
+//                         else{
+//                             // cout << "PQ: " << PQ.occupancy << " " << PQ.SIZE << " " << endl;
+//                             prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+//                             // cout << "LLC FILL" << endl;
+//                         }                        // cout << "PQ: " << PQ.occupancy << " " << MSHR.occupancy << " " << endl;
+//                     }
+//                 }
+//             }
+//             currentRound_prefetches.push_back(make_pair(pf_addr, mt1_config.prefetcher_id));
+//         }
+//         else{
+//             if (isPfActive[mt1_config.prefetcher_id]==true){
+//                 for (int i = 1; i <= MT_DEGREE; i++){
+//                     pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+//                     if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+//                         prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+//                     }
+//                 }
+//             }
+//             currentRound_prefetches.push_back(make_pair(pf_addr, mt1_config.prefetcher_id));
+//         }  
+//         prefetcher_count[3]++;
+//         pf_cnt++;
+//     }
+
+// // IDMM: MT1 MODULE ----------------------------------------------------------------------------------------------------------------------------        IDMM: MT1 MODULE
+
+// // IDMM: MT2 MODULE ----------------------------------------------------------------------------------------------------------------------------        IDMM: MT2 MODULE
+//     // vector<int64_t> markov_predictions2 = markov_prefetcher2.operate(shared_access_data, alignedAddr, ip, cache_hit, type);
+//     vector<int64_t> markov_predictions2 = markov_prefetcher2.operate(shared_access_data);
+//     flagged = 0;
+//     pf_cnt = 0;
+//     for (auto offset : markov_predictions2) {
+//         if (flagged == 0){
+//             pf_guess_cnt[mt2_config.prefetcher_id]++;
+//             flagged = 1;
+//         }
+        
+//         // if (pf_nxtH_acc[mt2_config.prefetcher_id] < 0.01 && pf_cnt >= 3){
+//         //     continue;
+//         // }
+//         // if (pf_nxtH_acc[mt2_config.prefetcher_id]<0.001 && pf_cnt >= 1){
+//         //     continue;
+//         // }
+        
+//         if (MSHR.occupancy < (MSHR.SIZE/2) ){   
+//             if (isPfActive[mt2_config.prefetcher_id]==true){ 
+//                     for (int i = 1; i <= MT_DEGREE; i++){
+//                         pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+//                         if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+//                             if (PQ.occupancy < PQ.SIZE){
+//                                 prefetch_line(ip, addr, (pf_addr), FILL_L2, metadata_in);
+//                             }
+//                             else{
+//                                 prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+//                                 // cout << "LLC FILL" << endl;
+//                             }
+//                         }
+//                     }
+//             }
+//             prefetcher_count[4]++;
+//             currentRound_prefetches.push_back(make_pair(pf_addr, mt2_config.prefetcher_id));
+//         }
+//         else{
+//             if (isPfActive[mt2_config.prefetcher_id]==true){
+//                 prefetcher_count[4]++;
+//                 for (int i = 1; i <= MT_DEGREE; i++){
+//                     pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+//                     if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+//                         prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+//                     }
+//                 }
+//             }
+//         }
+//         pf_cnt++;  
+//     }
+// // IDMM: MT2 MODULE ----------------------------------------------------------------------------------------------------------------------------        IDMM: MT2 MODULE
+
+// // IDMM: MT3 MODULE ----------------------------------------------------------------------------------------------------------------------------        IDMM: MT3 MODULE
+//     pf_cnt = 0;
+//     // vector<int64_t> markov_predictions3 = markov_prefetcher3.operate(shared_access_data, alignedAddr, ip, cache_hit, type);
+//     vector<int64_t> markov_predictions3 = markov_prefetcher3.operate(shared_access_data);
+//     flagged = 0;
+//     for (auto offset : markov_predictions3) {
+//         if (flagged == 0){
+//             pf_guess_cnt[mt3_config.prefetcher_id]++;
+//             flagged = 1;
+//         }
+
+//         // if (pf_nxtH_acc[mt3_config.prefetcher_id] < 0.01 && pf_cnt >= 3){
+//         //     continue;
+//         // }
+//         // if (pf_nxtH_acc[mt3_config.prefetcher_id]<0.001 && pf_cnt >= 1){
+//         //         continue;
+//         //     }
+
+
+//        if (MSHR.occupancy < (MSHR.SIZE/2)){  
+//            if (isPfActive[mt3_config.prefetcher_id]==true){
+//                 for (int i = 1; i <= MT_DEGREE; i++){
+//                     pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+//                     if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+//                         if (PQ.occupancy < PQ.SIZE){
+//                             prefetch_line(ip, addr, (pf_addr), FILL_L2, metadata_in);
+//                         }
+//                         else{
+//                             prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+//                             // cout << "LLC FILL" << endl;
+//                         }
+//                     }
+//                 }
+//            }  
+//            prefetcher_count[5]++;
+//            currentRound_prefetches.push_back(make_pair(pf_addr, mt3_config.prefetcher_id));
+//        }
+//        else{
+//            if (isPfActive[mt3_config.prefetcher_id]==true){
+//            prefetcher_count[5]++;
+//             for (int i = 1; i <= MT_DEGREE; i++){
+//                 pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+//                 if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+//                         prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+//                 }
+//             }
+//            }
+//        }  
+//        pf_cnt++;
+//    }
+
+// // IDMM: MT3 MODULE ---------------------------------------------------------------------------------------------------------------------------         IDMM: MT3 MODULE
+
+// // IDMM: MT4 MODULE ---------------------------------------------------------------------------------------------------------------------------         IDMM: MT4 MODULE
+//    pf_cnt = 0;
+// //    vector<int64_t> markov_predictions4 = markov_prefetcher4.operate(shared_access_data, alignedAddr, ip, cache_hit, type);
+//    vector<int64_t> markov_predictions4 = markov_prefetcher4.operate(shared_access_data);
+//    flagged = 0;
+//    pf_cnt = 0;
+//    for (auto offset : markov_predictions4) {
+//        if (flagged == 0){
+//            pf_guess_cnt[mt4_config.prefetcher_id]++;
+//            flagged = 1;
+//        }
+
+//     //    if (pf_nxtH_acc[mt4_config.prefetcher_id] < 0.01 && pf_cnt >= 3){
+//     //        continue;
+//     //    }
+//     //    if (pf_nxtH_acc[mt4_config.prefetcher_id]<0.001 && pf_cnt >= 1){
+//     //        continue;
+//     //    }
+       
+
+       
+//        if (MSHR.occupancy < (MSHR.SIZE/2)){ 
+//            if (isPfActive[mt4_config.prefetcher_id]==true){
+//                 for (int i = 1; i <= MT_DEGREE; i++){
+//                     pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+//                     if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+//                         if (PQ.occupancy < PQ.SIZE){
+//                             prefetch_line(ip, addr, (pf_addr), FILL_L2, metadata_in);
+//                         }
+//                         else{
+//                             prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+//                             // cout << "LLC FILL" << endl;
+//                         }
+//                     }
+//                 }
+//            }   
+//            prefetcher_count[6]++;
+//            currentRound_prefetches.push_back(make_pair(pf_addr, mt4_config.prefetcher_id));
+//        }
+//        else{
+//            if (isPfActive[mt4_config.prefetcher_id]==true){
+//                for (int i = 1; i <= MT_DEGREE; i++){
+//                     pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+//                     if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+//                         prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+//                     }
+//                }
+//                prefetcher_count[6]++;
+//            }
+//        }  
+//    }
+
+// // IDMM: MT4 MODULE --------------------------------------------------------------------------------------------------------------------------         IDMM: MT4 MODULE
+
+   // mt5 - IP Delta Predictor
+    // vector<int64_t> markov_predictions5 = markov_prefetcher5.operate(shared_access_data, alignedAddr, ip, cache_hit, type);
+    // vector<int64_t> markov_predictions5 = markov_prefetcher5.operate(shared_access_data);
+    // flagged = 0;
+    // pf_cnt = 0;
+    // // cout << "MT5: " << markov_predictions5.size();
+    // // current ip 
+    // // cout << "IP: " << ip ;
+
+    //     // cout << " " << ip-offset;
+    //     // PREDICTIONS FOR NEXT IPS FROM markov_predictions1 to markov_predictions4 
+    // // mt5 - IP Delta Predictor  
+    // // vector<int64_t> markov_predictions5 = markov_prefetcher5.operate(shared_access_data, alignedAddr, ip, cache_hit, type);
+    // // vector<int64_t> markov_predictions5 = markov_prefetcher5.operate(shared_access_data);
+
+    // // For each predicted IP, query the spatial prefetchers without corrupting their state
+    // for (auto offset : markov_predictions5) {
+    //     uint64_t predicted_ip = ip - offset;
+        
+    //     // Query each spatial prefetcher with the predicted IP
+    //     vector<int64_t> spatial_predictions1 = markov_prefetcher1.query_predictions(predicted_ip);
+    //     vector<int64_t> spatial_predictions2 = markov_prefetcher2.query_predictions(predicted_ip);
+    //     vector<int64_t> spatial_predictions3 = markov_prefetcher3.query_predictions(predicted_ip);
+    //     vector<int64_t> spatial_predictions4 = markov_prefetcher4.query_predictions(predicted_ip);
+        
+    //     // Process all spatial predictions
+    //     for (auto spatial_offset : spatial_predictions1) {
+    //         pf_addr = ((alignedAddr - spatial_offset) << LOG2_BLOCK_SIZE);
+    //         if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)) {
+    //             if (PQ.occupancy < PQ.SIZE) {
+    //                 prefetch_line(ip, addr, pf_addr, FILL_L2, metadata_in);
+    //             } else {
+    //                 prefetch_line(ip, addr, pf_addr, FILL_LLC, metadata_in);
+    //             }
+    //         }
+    //     }
+    //     // Repeat for spatial_predictions2, 3, and 4...
+    //     for (auto spatial_offset : spatial_predictions2) {
+    //         pf_addr = ((alignedAddr - spatial_offset) << LOG2_BLOCK_SIZE);
+    //         if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)) {
+    //             if (PQ.occupancy < PQ.SIZE) {
+    //                 prefetch_line(ip, addr, pf_addr, FILL_L2, metadata_in);
+    //             } else {
+    //                 prefetch_line(ip, addr, pf_addr, FILL_LLC, metadata_in);
+    //             }
+    //         }
+    //     }
+    //     for (auto spatial_offset : spatial_predictions3) {
+    //         pf_addr = ((alignedAddr - spatial_offset) << LOG2_BLOCK_SIZE);
+    //         if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)) {
+    //             if (PQ.occupancy < PQ.SIZE) {
+    //                 prefetch_line(ip, addr, pf_addr, FILL_L2, metadata_in);
+    //             } else {
+    //                 prefetch_line(ip, addr, pf_addr, FILL_LLC, metadata_in);
+    //             }
+    //         }
+    //     }
+    //     for (auto spatial_offset : spatial_predictions4) {
+    //         pf_addr = ((alignedAddr - spatial_offset) << LOG2_BLOCK_SIZE);
+    //         if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)) {
+    //             if (PQ.occupancy < PQ.SIZE) {
+    //                 prefetch_line(ip, addr, pf_addr, FILL_L2, metadata_in);
+    //             } else {
+    //                 prefetch_line(ip, addr, pf_addr, FILL_LLC, metadata_in);
+    //             }
+    //         }
+    //     }
+    // }
+
+    // cout << endl << "Acc: " << pf_nxtH_acc[mt5_config.prefetcher_id] << endl;
+
+    // for (auto offset : markov_predictions5) {
+    //     if (flagged == 0){
+    //         pf_guess_cnt[mt5_config.prefetcher_id]++;
+    //         flagged = 1;
+    //     }
+
+    //     // Apply confidence filters like your other MTs
+    //     if (pf_nxtH_acc[mt5_config.prefetcher_id] < 0.01 && pf_cnt >= 3){
+    //         continue;
+    //     }
+    //     if (pf_nxtH_acc[mt5_config.prefetcher_id]<0.001 && pf_cnt >= 1){
+    //         continue;
+    //     }
+        
+    //     // Generate prefetch addresses using IP delta as spatial offset
+    //     // Note: This interprets IP deltas as memory offsets, which is unconventional
+    //     if (MSHR.occupancy < (MSHR.SIZE/2)){ 
+    //         if (isPfActive[mt5_config.prefetcher_id]==true){
+    //             for (int i = 1; i <= MT_DEGREE; i++){
+    //                 pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+    //                 if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+    //                     if (PQ.occupancy != PQ.SIZE){
+    //                         // prefetch_line(ip, addr, (pf_addr), FILL_L2, metadata_in);
+    //                     }
+    //                     else{
+    //                         // prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+    //                     }
+    //                 }
+    //             }
+    //         }   
+    //         prefetcher_count[mt5_config.prefetcher_id]++;  // Using index 7 for MT5
+    //         currentRound_prefetches.push_back(make_pair(pf_addr, mt5_config.prefetcher_id));
+    //     }
+    //     else{
+    //         if (isPfActive[mt5_config.prefetcher_id]==true){
+    //             for (int i = 1; i <= MT_DEGREE; i++){
+    //                 pf_addr = ((alignedAddr - (offset*i)) << LOG2_BLOCK_SIZE);
+    //                 if ((pf_addr >> LOG2_PAGE_SIZE) == (addr >> LOG2_PAGE_SIZE)){
+    //                     // prefetch_line(ip, addr, (pf_addr), FILL_LLC, metadata_in);
+    //                 }
+    //             }
+    //             prefetcher_count[mt5_config.prefetcher_id]++;
+    //         }
+    //     }  
+    //     pf_cnt++;
+    // }
+
+   
+   
+
+   // Update global state - EXACT as original
+   pre_previous_addr = previous_addr;
+   preIP = ip;
+   previous_addr = addr;
+   cnt++;
+
+    // Reset tracker index for next access
+    tracker_i = 0;
+
+   return metadata_in;
+}
+
+uint32_t CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in) {
+   return metadata_in;
+}
+
+void CACHE::l2c_prefetcher_final_stats() {
+   cout << "CPU " << cpu << " L2C PC-based stride prefetcher final stats" << endl;
+   cout << "Stride Degree: " << PREFETCH_DEGREE << endl;
+   
+   cout << "MT1  MARKOV_LRU_SIZE: " << mt1_config.lru_size << endl;
+   cout << "MT1  MARKOV_PREDICTION_PERCENTTHRESHOLD: " << mt1_config.percent_threshold << endl;
+   cout << "MT1  OUTLIERS_THRESHOLD_Max: " << mt1_config.tracking_max << endl;
+   cout << "MT1  OUTLIERS_THRESHOLD_Min: " << mt1_config.tracking_min << endl; 
+
+   cout << "MT2  MARKOV_LRU_SIZE: " << mt2_config.lru_size << endl;
+   cout << "MT2  MARKOV_PREDICTION_PERCENTTHRESHOLD: " << mt2_config.percent_threshold << endl;
+   cout << "MT2  OUTLIERS_THRESHOLD_Max: " << mt2_config.tracking_max << endl;
+   cout << "MT2  OUTLIERS_THRESHOLD_Min: " << mt2_config.tracking_min << endl; 
+
+   cout << "MT3  MARKOV_LRU_SIZE: " << mt3_config.lru_size << endl;
+   cout << "MT3  MARKOV_PREDICTION_PERCENTTHRESHOLD: " << mt3_config.percent_threshold << endl;
+   cout << "MT3  OUTLIERS_THRESHOLD_Max: " << mt3_config.tracking_max << endl;
+   cout << "MT3  OUTLIERS_THRESHOLD_Min: " << mt3_config.tracking_min << endl; 
+
+   cout << "MT4  MARKOV_LRU_SIZE: " << mt4_config.lru_size << endl;
+   cout << "MT4  MARKOV_PREDICTION_PERCENTTHRESHOLD: " << mt4_config.percent_threshold << endl;
+   cout << "MT4  OUTLIERS_THRESHOLD_Max: " << mt4_config.tracking_max << endl;
+   cout << "MT4  OUTLIERS_THRESHOLD_Min: " << mt4_config.tracking_min << endl;
+
+   cout << "IPStride Degree/Access Ratio: " << (double)prefetcher_count[2]/(double)cnt << endl;
+   cout << "MT1 IPDEltaMarkov  Degree/Access Ratio: " << (double)prefetcher_count[3]/(double)cnt << endl;
+   cout << "MT2 IPDEltaMarkov  Degree/Access Ratio: " << (double)prefetcher_count[4]/(double)cnt << endl;
+   cout << "MT3 IPDEltaMarkov  Degree/Access Ratio: " << (double)prefetcher_count[5]/(double)cnt << endl;
+   cout << "MT4 IPDEltaMarkov  Degree/Access Ratio: " << (double)prefetcher_count[6]/(double)cnt << endl;
+}

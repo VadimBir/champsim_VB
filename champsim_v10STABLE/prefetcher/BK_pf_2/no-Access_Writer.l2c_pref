@@ -1,0 +1,57 @@
+#include "cache.h"
+#include <fstream>
+#include <iostream>
+#include <cstdint>
+#include <cstring>
+#include "globals.h"
+
+#import "accessWriter.cpp"
+
+// Prefetcher-scoped instance
+accessBinStore binStore2;
+uint64_t cnt2 = 1;
+
+// ChampSim Prefetcher Functions
+void CACHE::l2c_prefetcher_initialize() {
+    binStore2.initialize("v3_L3_no-Access_Writer-L2_no-Access_Writer-Mem-MSHR-Cycle-Instr-_FE_[GPT-Neo-125M-_[s4096.bin");
+    std::cout << "Prefetcher initialized." << std::endl;
+}
+
+uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint32_t metadata_in) {
+    uint64_t block_addr = addr >> LOG2_BLOCK_SIZE;
+
+    Access access;
+    access.cache_lvl = 2;
+    access.type = type;
+    access.instr = pf_stat_num_retired;
+    access.cycle = current_core_cycle[cpu];
+    access.MSHR = MSHR.occupancy;
+    access.address = block_addr;
+    access.ip = ip;
+    access.hit = cache_hit;
+    access.cnt = cnt2;
+    // std::memset(access.extra_data, 0, sizeof(access.extra_data));
+    binStore2.store(access);
+
+
+    // // get current_core_cycle
+    // if ((pf_stat_num_retired%5000000<10000 || pf_stat_num_retired%5000000>4900001)) {
+    //     std::cout << "Cycle: " << current_core_cycle[cpu] << std::endl;
+    //     // num_retired
+    //     std::cout << "num_retired: " << pf_stat_num_retired << std::endl;
+    // }
+    //printf("Cycle: %lu\n", current_core_cycle);
+    cnt2++;
+    return metadata_in;
+}
+
+uint32_t CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in) {
+    return metadata_in;
+}
+
+void CACHE::l2c_prefetcher_final_stats() {
+    // binStore2.close();
+    std::cout << "Prefetcher simulation complete. Binary file closed." << std::endl;
+    // collected number of entries 
+    std::cout << "Number of entries L2: |" << cnt2 <<"|"<< std::endl;
+}

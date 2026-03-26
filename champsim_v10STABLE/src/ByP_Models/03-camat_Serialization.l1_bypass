@@ -1,0 +1,26 @@
+// ============================================================
+// METHOD 2: C-AMAT SERIALIZATION
+// bypass iff current level more serialized than next level
+// C-AMAT(current) > C-AMAT(next)  [Eq31: C-AMAT=AMAT/C, more serial=higher C-AMAT]
+// + MSHR ceiling at current level [Eq26: Cm ceiling]
+// + RQ gate at next level
+// ============================================================
+
+// --- M2 L1D ---
+inline bool l1d_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (!l1_bypass_init) {
+        cout << "L1D Bypass [M2 C-AMAT Serialization]:\n"
+             << "  P1: L1D MSHR full         [Eq26: Cm at ceiling]\n"
+             << "  P2: L2C RQ not full       [physical routing]\n"
+             << "  P3: camat(L1D) > camat(L2C) [Eq31: L1D more serialized]\n"
+             << "  Chain: free MSHR -> new accesses -> C(L1D)up -> camat down [Eq22,31,35]\n";
+        l1_bypass_init = true;
+    }
+    if (L1D->MSHR.occupancy < L1D->MSHR.SIZE) return false;
+    if (L2C->RQ.occupancy   >= L2C->RQ.SIZE)  return false;
+
+    const auto& t1 = lpm[cpu][L1D_type];
+    const auto& t2 = lpm[cpu][L2C_type];
+
+    return t1.camat_activeMemCyDivAccesses_ratio > t2.camat_activeMemCyDivAccesses_ratio;
+}

@@ -922,7 +922,7 @@ void O3_CPU::schedule_memory_instruction()
 
     auto scan = [&](uint32_t start, uint32_t end) -> bool {
         for (uint32_t i = start; i < end; i++) {
-            __builtin_prefetch(&rob_events_ptr[i + 16], 0, 1);
+            __builtin_prefetch(&rob_events_ptr[i + 8], 0, 1);
 
             const uint64_t entry = rob_events_ptr[i];
 

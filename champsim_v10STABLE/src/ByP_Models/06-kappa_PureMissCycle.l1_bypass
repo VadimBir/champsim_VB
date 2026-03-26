@@ -1,0 +1,25 @@
+// ============================================================
+// METHOD 3: PURE MISS CYCLE TARGETING
+// P1: last_class == M  (current cycle IS the pure stall [Eq18,19])
+//     -> bypass converts future M cycles to X [Eq15: kappa drops -> MST drops Eq35]
+//     -> also increases ci(next) via Eq37 -> CM(next) up -> camat(next) down [Eq27,33]
+// P2: RQ not full
+// P3: windowed w_m > w_h  (phi<0.5 [Eq13+16]: miss dominates, fill not worth doing)
+// ============================================================
+
+// --- M3 L1D ---
+inline bool l1d_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (!l1_bypass_init) {
+        cout << "L1D Bypass [M3 Pure Miss Cycle Targeting]:\n"
+             << "  P1: last_class(L1D)==M  [Eq18,19: only M cycles are pure stall]\n"
+             << "  P2: L2C RQ not full     [physical routing]\n"
+             << "  P3: w_m > w_h           [Eq13+16: phi<0.5, fill not worth it]\n"
+             << "  Effect: M->X conversion via freed MSHR [Eq15->35->37->27->33->41]\n";
+        l1_bypass_init = true;
+    }
+    if (lpm[cpu][L1D_type].last_class != LPM_CLASS_M) return false;
+    if (L2C->RQ.occupancy >= L2C->RQ.SIZE)            return false;
+
+    const auto& t1 = lpm[cpu][L1D_type];
+    return t1.w_m > t1.w_h;
+}

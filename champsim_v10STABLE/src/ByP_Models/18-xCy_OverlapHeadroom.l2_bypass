@@ -1,0 +1,24 @@
+// ============================================================
+// METHOD 7: STRUCTURAL OVERLAP HEADROOM (no prediction)
+// headroom = w_x / w_m
+// bypass iff headroom < 1.0  (pure-miss > overlap => saturated)
+// [Eq15,18,19]
+// ============================================================
+
+// --- M7 L2C ---
+inline bool l2c_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (!l2_bypass_init) {
+        cout << "L2C Bypass [M7 Structural Overlap Headroom]:\n"
+             << "  headroom = w_x(L2C) / w_m(L2C)\n"
+             << "  bypass iff headroom < 1.0\n";
+        l2_bypass_init = true;
+    }
+    if (LLC->RQ.occupancy >= LLC->RQ.SIZE) return false;
+
+    const auto& t2 = lpm[cpu][L2C_type];
+
+    if (t2.w_m <= 0.0) return false;
+
+    double headroom = t2.w_x / t2.w_m;
+    return headroom < 1.0;
+}

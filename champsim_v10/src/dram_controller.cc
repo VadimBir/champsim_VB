@@ -808,7 +808,7 @@ int MEMORY_CONTROLLER::check_dram_queue(PACKET_QUEUE *queue, PACKET *packet)
 }
 
  
-uint32_t MEMORY_CONTROLLER::dram_get_channel(uint64_t address)
+constexpr uint32_t MEMORY_CONTROLLER::dram_get_channel(uint64_t address) const
 {
     if (LOG2_DRAM_CHANNELS == 0)
         return 0;
@@ -818,7 +818,7 @@ uint32_t MEMORY_CONTROLLER::dram_get_channel(uint64_t address)
     return (uint32_t) (address >> shift) & (DRAM_CHANNELS - 1);
 }
 
-uint32_t MEMORY_CONTROLLER::dram_get_bank(uint64_t address)
+constexpr uint32_t MEMORY_CONTROLLER::dram_get_bank(uint64_t address) const
 {
     if (LOG2_DRAM_BANKS == 0)
         return 0;
@@ -828,7 +828,7 @@ uint32_t MEMORY_CONTROLLER::dram_get_bank(uint64_t address)
     return (uint32_t) (address >> shift) & (DRAM_BANKS - 1);
 }
 
-uint32_t MEMORY_CONTROLLER::dram_get_column(uint64_t address)
+constexpr uint32_t MEMORY_CONTROLLER::dram_get_column(uint64_t address) const
 {
     if (LOG2_DRAM_COLUMNS == 0)
         return 0;
@@ -838,7 +838,7 @@ uint32_t MEMORY_CONTROLLER::dram_get_column(uint64_t address)
     return (uint32_t) (address >> shift) & (DRAM_COLUMNS - 1);
 }
 
-uint32_t MEMORY_CONTROLLER::dram_get_rank(uint64_t address)
+constexpr uint32_t MEMORY_CONTROLLER::dram_get_rank(uint64_t address) const
 {
     if (LOG2_DRAM_RANKS == 0)
         return 0;
@@ -848,7 +848,7 @@ uint32_t MEMORY_CONTROLLER::dram_get_rank(uint64_t address)
     return (uint32_t) (address >> shift) & (DRAM_RANKS - 1);
 }
 
-uint32_t MEMORY_CONTROLLER::dram_get_row(uint64_t address)
+constexpr uint32_t MEMORY_CONTROLLER::dram_get_row(uint64_t address) const
 {
     if (LOG2_DRAM_ROWS == 0)
         return 0;
@@ -858,8 +858,8 @@ uint32_t MEMORY_CONTROLLER::dram_get_row(uint64_t address)
     return (uint32_t) (address >> shift) & (DRAM_ROWS - 1);
 }
 
-uint32_t MEMORY_CONTROLLER::get_occupancy(uint8_t queue_type, uint64_t address)
-{      
+uint32_t MEMORY_CONTROLLER::get_occupancy(uint8_t queue_type, uint64_t address) const
+{
     uint32_t channel = dram_get_channel(address);
     if (queue_type == 1)
         return RQ[channel].occupancy;
@@ -869,7 +869,7 @@ uint32_t MEMORY_CONTROLLER::get_occupancy(uint8_t queue_type, uint64_t address)
     return 0;
 }
 
-uint32_t MEMORY_CONTROLLER::get_size(uint8_t queue_type, uint64_t address)
+uint32_t MEMORY_CONTROLLER::get_size(uint8_t queue_type, uint64_t address) const
 {
     uint32_t channel = dram_get_channel(address);
     if (queue_type == 1)

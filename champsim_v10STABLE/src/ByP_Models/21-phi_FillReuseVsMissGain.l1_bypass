@@ -1,0 +1,49 @@
+// ============================================================
+// METHOD 8 (Claude): φ FILL-REUSE vs MISS-GAIN BALANCE
+// Core idea: a fill is only worth doing if the probability of
+// reuse (φ = hit fraction) exceeds the overlap gain from NOT
+// filling (keeping the MSHR slot free increases μ, reducing MST).
+//
+// fill_value  = phi * h_cy_per_access   [expected hit savings if kept]
+// miss_gain   = mu * kappa * camat_next [expected stall reduction if bypassed]
+// bypass iff miss_gain > fill_value
+//
+// [Eq13: phi = h/(h+m+x+e)]
+// [Eq35: MST = mu*kappa*camat — bypass reduces this at current level]
+// [Eq27: h_cy = H cycles / accesses — hit latency amortized]
+// Intuition: if hits are rare (phi low) and miss stalls are deep
+// (mu*kappa high), fill has little future value — bypass wins.
+// ============================================================
+
+// --- M8 L1D ---
+inline bool l1d_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (!l1_bypass_init) {
+        cout << "L1D Bypass [M8 phi Fill-Reuse vs Miss-Gain]:\n"
+             << "  fill_value = phi_L1D * (w_h / accesses_L1D)  [Eq13,27]\n"
+             << "  miss_gain  = w_mu * w_kappa * camat_L2C       [Eq35]\n"
+             << "  bypass iff miss_gain > fill_value\n";
+        l1_bypass_init = true;
+    }
+    if (L2C->RQ.occupancy >= L2C->RQ.SIZE) return false;
+
+    const auto& t1 = lpm[cpu][L1D_type];
+    const auto& t2 = lpm[cpu][L2C_type];
+
+    double total = t1.w_h + t1.w_m + t1.w_x + t1.w_e;
+    if (total <= 0.0) return false;
+    double phi = t1.w_h / total;
+
+    // h_cy_per_access: H cycles amortized over accesses
+    double acc = t1.w_h + t1.w_m;  // proxy: hits+misses = demand accesses
+    if (acc <= 0.0) return false;
+    double h_cy_per_acc = t1.w_h / acc;
+
+    double fill_value = phi * h_cy_per_acc;
+
+    double camat_next = t2.camat_activeMemCyDivAccesses_ratio;
+    double miss_gain  = t1.w_µ_sumMissOverlapCyDivMemActiveCy_ratio()
+                      * t1.w_κ_pureMissCyDivSumMissOverlapCy_ratio()
+                      * camat_next;
+
+    return miss_gain > fill_value;
+}

@@ -36,7 +36,8 @@ void print_core_config();
 
 #include "unordered_dense.h"
 #include "svector.h"
-// for every new ROB entry, we store ADDR:ROB_INDEX mapping to later O(1) get RAW for new 
+
+// for every new ROB entry, we store ADDR:ROB_INDEX mapping to later O(1) get RAW for new
 class  AddrDependencyTracker {
 private:
     // Map: register -> ALL ROB indices that write to it (in order)
@@ -70,8 +71,8 @@ public:
         if (vec.empty()) return -1;
         
         for (auto rit = vec.rbegin(); rit != vec.rend(); ++rit) {
-            if ((rob_head <= current_rob) ? 
-                ((*rit >= rob_head) & (*rit < current_rob)) : 
+            if ((rob_head <= current_rob) ?
+                ((*rit >= rob_head) & (*rit < current_rob)) :
                 ((*rit >= rob_head) | (*rit < current_rob))) return *rit;
         }
         return -1;
@@ -128,8 +129,8 @@ public:
             uint32_t idx = rit->first;
             
             // Check if in valid ROB window
-            if ((rob_head <= current_rob) ? 
-                ((idx >= rob_head) && (idx < current_rob)) : 
+            if ((rob_head <= current_rob) ?
+                ((idx >= rob_head) && (idx < current_rob)) :
                 ((idx >= rob_head) || (idx < current_rob))) {
                 return {idx, rit->second};
             }

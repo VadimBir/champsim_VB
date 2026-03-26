@@ -1,0 +1,33 @@
+// ============================================================
+// METHOD 4: MST COMPARISON  [Eq35: MST=mu*kappa*C-AMAT]
+// bypass iff MST(current) > MST(next)
+// = stall per access at current > stall per access at next
+// shifting miss to less-stalled level reduces net MST [Eq4,18,35]
+// + RQ gate
+// ============================================================
+
+// --- M4 L1D ---
+inline bool l1d_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (!l1_bypass_init) {
+        cout << "L1D Bypass [M4 MST Comparison]:\n"
+             << "  MST(l) = mu(l)*kappa(l)*camat(l)  [Eq35]\n"
+             << "  P1: L2C RQ not full\n"
+             << "  P2: MST(L1D) > MST(L2C)  [shifting miss to less-stalled level]\n"
+             << "  Uses windowed mu,kappa for recency bias\n";
+        l1_bypass_init = true;
+    }
+    if (L2C->RQ.occupancy >= L2C->RQ.SIZE) return false;
+
+    const auto& t1 = lpm[cpu][L1D_type];
+    const auto& t2 = lpm[cpu][L2C_type];
+
+    double mst_l1d = t1.w_µ_sumMissOverlapCyDivMemActiveCy_ratio()
+                   * t1.w_κ_pureMissCyDivSumMissOverlapCy_ratio()
+                   * t1.camat_activeMemCyDivAccesses_ratio;
+
+    double mst_l2c = t2.w_µ_sumMissOverlapCyDivMemActiveCy_ratio()
+                   * t2.w_κ_pureMissCyDivSumMissOverlapCy_ratio()
+                   * t2.camat_activeMemCyDivAccesses_ratio;
+
+    return mst_l1d > mst_l2c;
+}

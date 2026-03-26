@@ -1,0 +1,38 @@
+// ============================================================
+// METHOD 1: SUPPLY/DEMAND — C-AMAT budget at next level
+// available = free_next × camat_next
+// immediate = (RQ+PQ).occ_next × camat_next
+// future    = μ(current) × camat_next   [Eq 14+52: propagation pressure]
+// entry     = camat_next                [Eq 30: one bypass slot cost]
+// bypass iff available > immediate + future + entry
+// ============================================================
+
+// --- M1 L1D ---
+inline bool l1d_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (!l1_bypass_init) {
+        cout << "L1D Bypass [M1 Supply/Demand]:\n"
+             << "  available = free_L2C * camat_L2C\n"
+             << "  immediate = (L2C.RQ+PQ).occ * camat_L2C\n"
+             << "  future    = mu(L1D) * camat_L2C  [Eq14+52]\n"
+             << "  entry     = camat_L2C             [Eq30]\n"
+             << "  bypass iff available > immediate+future+entry\n";
+        l1_bypass_init = true;
+    }
+    if (L2C->RQ.occupancy >= L2C->RQ.SIZE) return false;
+
+    const auto& t1 = lpm[cpu][L1D_type];
+    const auto& t2 = lpm[cpu][L2C_type];
+
+    double camat   = t2.camat_activeMemCyDivAccesses_ratio;
+    if (camat <= 0.0) return false;
+
+    double mu_l1d  = t1.µ_sumMissOverlapCyDivMemActiveCy_ratio();
+    uint32_t free  = L2C->MSHR.SIZE - L2C->MSHR.occupancy;
+
+    double available = (double)free                                  * camat;
+    double immediate = (double)(L2C->RQ.occupancy + L2C->PQ.occupancy) * camat;
+    double future    = mu_l1d                                        * camat;
+    double entry     =                                                 camat;
+
+    return available > (immediate + future + entry);
+}

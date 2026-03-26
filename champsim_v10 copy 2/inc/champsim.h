@@ -26,8 +26,8 @@
 // USEFUL MACROS
 
 // comment out disables it, uncomment enables it
-#define TRUE_SANITY_CHECK 1
-#define SANITY_CHECK 1
+// #define TRUE_SANITY_CHECK 1
+// #define SANITY_CHECK 1
 
 #define BYPASS_L1D_OnNewMiss
 #define BYPASS_SANITY_CHECK

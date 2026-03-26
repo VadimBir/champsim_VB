@@ -751,11 +751,11 @@ void CACHE::operate() {
         handle_prefetch();
 }
 
-uint32_t CACHE::get_set(const uint64_t address) {
+constexpr uint32_t CACHE::get_set(const uint64_t address) {
     return (uint32_t) (address & ((1 << lg2(NUM_SET)) - 1));
 }
 
-uint32_t CACHE::get_way(const uint64_t address, const uint32_t set) {
+uint32_t CACHE::get_way(const uint64_t address, const uint32_t set) const {
     for (uint32_t way=0; way<NUM_WAY; way++) {
         if (block[set][way].valid && (block[set][way].tag == address))
             return way;
@@ -1437,7 +1437,7 @@ void CACHE::update_fill_cycle() {
     }
 }
 
-int CACHE::probe_mshr(PACKET *packet) {
+int CACHE::probe_mshr(PACKET *packet) const {
     for (uint16_t index = 0; index < MSHR_SIZE; index++) {
         if (MSHR.entry[index].address == packet->address)
             return index;
@@ -1537,7 +1537,7 @@ inline void CACHE::add_mshr(PACKET *packet) {
 #endif
 }
 
-uint32_t CACHE::get_occupancy(uint8_t queue_type, uint64_t address) {
+uint32_t CACHE::get_occupancy(uint8_t queue_type, uint64_t address) const {
     switch (queue_type) {
         case 0: return MSHR.occupancy;
         case 1: return RQ.occupancy;
@@ -1547,7 +1547,7 @@ uint32_t CACHE::get_occupancy(uint8_t queue_type, uint64_t address) {
     }
 }
 
-uint32_t CACHE::get_size(uint8_t queue_type, uint64_t address)
+uint32_t CACHE::get_size(uint8_t queue_type, uint64_t address) const
 {
     switch (queue_type) {
         case 0: return MSHR.SIZE;

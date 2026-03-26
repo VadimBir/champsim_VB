@@ -93,7 +93,7 @@ class CACHE : public MEMORY {
     
     // bool BYPASS_L1D_OnNewMiss = false; // VB CUSTOM
     bool BYPASS_L1D_on_MSHR_cap = false; // VB CUSTOM
-    int probe_mshr(PACKET *packet);
+    int probe_mshr(PACKET *packet) const;
 
     void set_force_all_hits(bool toEnable); // VB CUSTOM
 // VB: CUSTOM CODE END 
@@ -189,8 +189,8 @@ class CACHE : public MEMORY {
          operate(),
          increment_WQ_FULL(uint64_t address);
 
-    uint32_t get_occupancy(uint8_t queue_type, uint64_t address),
-             get_size(uint8_t queue_type, uint64_t address);
+    uint32_t get_occupancy(uint8_t queue_type, uint64_t address) const;
+    uint32_t get_size(uint8_t queue_type, uint64_t address) const;
 
     int  check_hit(PACKET *packet),
          invalidate_entry(uint64_t inval_addr),
@@ -857,8 +857,8 @@ class CACHE : public MEMORY {
         update_fill_cycle();
     }
 
-    uint32_t get_set(uint64_t address),
-             get_way(uint64_t address, uint32_t set),
+    constexpr uint32_t get_set(uint64_t address);
+    uint32_t get_way(uint64_t address, uint32_t set) const,
              find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type),
              llc_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type),
              lru_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type);

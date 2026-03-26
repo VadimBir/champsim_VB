@@ -1,0 +1,34 @@
+// ============================================================
+// METHOD 7: STRUCTURAL OVERLAP HEADROOM (no prediction)
+// Core idea: purely reactive — measure current overlap headroom
+// as X cycles available vs M cycles pending. If X headroom is
+// high relative to M, a new miss can hide; if X is already
+// saturated (all M cycles are pure), bypass gains nothing.
+//
+// headroom = w_x / max(w_m, 1)
+//   high headroom => overlap window is wide => new miss CAN hide
+//   bypass iff headroom < threshold (overlap window saturated)
+//   threshold = 1.0: bypass when pure-miss exceeds overlap
+//
+// No predictions, no latency estimates — purely cycle-class ratio
+// [Eq15,18,19: X=overlap, M=pure miss — ratio tells saturation]
+// ============================================================
+
+// --- M7 L1D ---
+inline bool l1d_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (!l1_bypass_init) {
+        cout << "L1D Bypass [M7 Structural Overlap Headroom]:\n"
+             << "  headroom = w_x / w_m  [Eq15,18,19: X/M ratio]\n"
+             << "  bypass iff headroom < 1.0  (pure-miss dominates overlap)\n"
+             << "  no prediction — purely reactive cycle-class measurement\n";
+        l1_bypass_init = true;
+    }
+    if (L2C->RQ.occupancy >= L2C->RQ.SIZE) return false;
+
+    const auto& t1 = lpm[cpu][L1D_type];
+
+    if (t1.w_m <= 0.0) return false;  // no miss cycles — nothing to bypass
+
+    double headroom = t1.w_x / t1.w_m;
+    return headroom < 1.0;
+}
