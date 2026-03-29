@@ -608,7 +608,7 @@ uint64_t* rob_events_ptr;
 #include <bitset>
 std::bitset<ROB_SIZE> valid_bits;
 uint32_t stop_index;
-uint32_t local_num_searched;
+
 constexpr uint16_t TILE_SIZE = 8;
 // create globally all the local vars of the schedule instruction and schedule memory isntruction
 uint32_t tile_start;
@@ -634,7 +634,7 @@ void O3_CPU::schedule_instruction()
 
     // uint64_t current_cycle = current_core_cycle[cpu];
     const uint32_t limit = ROB.next_fetch[1];
-    local_num_searched = 0;
+    uint32_t local_num_searched = 0;
     // uint64_t threshold = (current_core_cycle[cpu] << 8) | (COMPLETE_fetch_t - 1);
 
 
@@ -647,16 +647,16 @@ void O3_CPU::schedule_instruction()
                 uint64_t entry = rob_events_ptr[i];
                 // entry = full_entry;
                 uint64_t ev_cycle = entry >> 8;
-                if (!(entry & COMPLETE_fetch_t) || local_num_searched >= SCHEDULER_SIZE || ev_cycle > curr_cycle){
-                    stop_index = i;
+                if (!(entry & COMPLETE_fetch_t) || local_num_searched++ >= ROB.occupancy || ev_cycle > curr_cycle)
                     goto done;
-                }
+                    // stop_index = i;
+
                 // WE CHECK BOTH OR BITS, BECAUSE TWO DIFF BITS ARE USED FOR TYP_SCHEDULE i.e. 16 AND 32 ONLY OF BOTH ARE NOT SET THEN WE HAVE SCHEDULE 0
                 if (!(entry & (INFLIGHT_schedule_t | COMPLETE_schedule_t))){
                     valid_bits.set(i);
                 }
-                local_num_searched++;
-                stop_index = i + 1;
+                // local_num_searched++;
+                // stop_index = i + 1;
             }
         }
     }
@@ -1195,25 +1195,25 @@ void O3_CPU::operate_lsq()
     // handle store
     uint32_t store_issued = 0, num_iteration = 0;
 
+    PACKET sq_data_packet = SQ_TLB_DATA_TEMPLATE;
     while (store_issued < SQ_WIDTH) {
         if (RTS0[RTS0_head] < SQ_SIZE) {
             uint16_t sq_index = RTS0[RTS0_head];
             if (SQ.entry[sq_index].event_cycle <= current_core_cycle[cpu]) {
 
                 // add it to DTLB
-                PACKET data_packet = SQ_TLB_DATA_TEMPLATE;
-                data_packet.cpu = cpu;
-                data_packet.data_index = SQ.entry[sq_index].data_index;
-                data_packet.sq_index = sq_index;
-                data_packet.address = SQ.entry[sq_index].virtual_address >> LOG2_PAGE_SIZE;
-                data_packet.full_addr = SQ.entry[sq_index].virtual_address;
-                data_packet.instr_id = SQ.entry[sq_index].instr_id;
-                data_packet.rob_index = SQ.entry[sq_index].rob_index;
-                data_packet.ip = SQ.entry[sq_index].ip;
-                data_packet.asid[0] = SQ.entry[sq_index].asid[0];
-                data_packet.asid[1] = SQ.entry[sq_index].asid[1];
-                data_packet.event_cycle = SQ.entry[sq_index].event_cycle;
-                int rq_index = DTLB.add_rq(&data_packet);
+                sq_data_packet.cpu = cpu;
+                sq_data_packet.data_index = SQ.entry[sq_index].data_index;
+                sq_data_packet.sq_index = sq_index;
+                sq_data_packet.address = SQ.entry[sq_index].virtual_address >> LOG2_PAGE_SIZE;
+                sq_data_packet.full_addr = SQ.entry[sq_index].virtual_address;
+                sq_data_packet.instr_id = SQ.entry[sq_index].instr_id;
+                sq_data_packet.rob_index = SQ.entry[sq_index].rob_index;
+                sq_data_packet.ip = SQ.entry[sq_index].ip;
+                sq_data_packet.asid[0] = SQ.entry[sq_index].asid[0];
+                sq_data_packet.asid[1] = SQ.entry[sq_index].asid[1];
+                sq_data_packet.event_cycle = SQ.entry[sq_index].event_cycle;
+                int rq_index = DTLB.add_rq(&sq_data_packet);
 
                 if (rq_index == -2)
                     break;
@@ -1263,26 +1263,25 @@ void O3_CPU::operate_lsq()
 
     unsigned load_issued = 0;
     num_iteration = 0;
+    PACKET lq_data_packet = LQ_TLB_DATA_TEMPLATE;
     while (load_issued < LQ_WIDTH) {
         if (RTL0[RTL0_head] < LQ_SIZE) {
             const uint32_t lq_index = RTL0[RTL0_head];
             if (LQ.entry[lq_index].event_cycle <= current_core_cycle[cpu]) {
 
                 // add it to DTLB
-                PACKET data_packet = LQ_TLB_DATA_TEMPLATE;
-
-                data_packet.cpu = cpu;
-                data_packet.data_index = LQ.entry[lq_index].data_index;
-                data_packet.lq_index = lq_index;
-                data_packet.address = LQ.entry[lq_index].virtual_address >> LOG2_PAGE_SIZE;
-                data_packet.full_addr = LQ.entry[lq_index].virtual_address;
-                data_packet.instr_id = LQ.entry[lq_index].instr_id;
-                data_packet.rob_index = LQ.entry[lq_index].rob_index;
-                data_packet.ip = LQ.entry[lq_index].ip;
-                data_packet.asid[0] = LQ.entry[lq_index].asid[0];
-                data_packet.asid[1] = LQ.entry[lq_index].asid[1];
-                data_packet.event_cycle = LQ.entry[lq_index].event_cycle;
-                int rq_index = DTLB.add_rq(&data_packet);
+                lq_data_packet.cpu = cpu;
+                lq_data_packet.data_index = LQ.entry[lq_index].data_index;
+                lq_data_packet.lq_index = lq_index;
+                lq_data_packet.address = LQ.entry[lq_index].virtual_address >> LOG2_PAGE_SIZE;
+                lq_data_packet.full_addr = LQ.entry[lq_index].virtual_address;
+                lq_data_packet.instr_id = LQ.entry[lq_index].instr_id;
+                lq_data_packet.rob_index = LQ.entry[lq_index].rob_index;
+                lq_data_packet.ip = LQ.entry[lq_index].ip;
+                lq_data_packet.asid[0] = LQ.entry[lq_index].asid[0];
+                lq_data_packet.asid[1] = LQ.entry[lq_index].asid[1];
+                lq_data_packet.event_cycle = LQ.entry[lq_index].event_cycle;
+                int rq_index = DTLB.add_rq(&lq_data_packet);
 
                 if (rq_index == -2)
                     break; // break here

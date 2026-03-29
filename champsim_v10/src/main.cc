@@ -1578,8 +1578,6 @@ if (num_instr_dest == 2) {
                      << setw(3) << right << (int)(uncore.LLC.ByP_req[i] ? ((float)uncore.LLC.ByP_issued[i] / (float)uncore.LLC.ByP_req[i]) * 100 : 0)
                      << left 
                      << " " STR_APC
-                     // ① ② ③ Ⓜ
-                     << "⚙" << setw(5) << FIXED_FLOAT2(get_recursive_apc(i)) 
                      << "①" << setw(6) << FIXED_FLOAT2(lpm[i][L1D_type].apc_accessesDivActiveMemCy_ratio)
                      << "②" << setw(6) << FIXED_FLOAT2(lpm[i][L2C_type].apc_accessesDivActiveMemCy_ratio)
                      << "③" << setw(6) << FIXED_FLOAT2(lpm[i][LLC_type].apc_accessesDivActiveMemCy_ratio)
@@ -1593,14 +1591,12 @@ if (num_instr_dest == 2) {
                      << "Ⓜ" << setw(6) << FIXED_FLOAT2(lpm[i][DRAM_type].lpmr_activeMemCyDivIdealCy_ratio)
                      << left
                      << " " STR_cAMT
-                     << "⚙" << setw(5) << FIXED_FLOAT2(get_recursive_camat(i))
                      << "①" << setw(6) << FIXED_FLOAT2(lpm[i][L1D_type].camat_activeMemCyDivAccesses_ratio)
                      << "②" << setw(6) << FIXED_FLOAT2(lpm[i][L2C_type].camat_activeMemCyDivAccesses_ratio)
                      << "③" << setw(6) << FIXED_FLOAT2(lpm[i][LLC_type].camat_activeMemCyDivAccesses_ratio)
                      << "Ⓜ" << setw(6) << FIXED_FLOAT2(lpm[i][DRAM_type].camat_activeMemCyDivAccesses_ratio)
                      << left
                      << " " STR_MST
-                     << "⚙" << setw(5) << FIXED_FLOAT2(lpm[i][L1D_type].mst_pureMissCyDivAccesses_ratio)
                      << "①" << setw(6) << FIXED_FLOAT2(lpm[i][L1D_type].mst_pureMissCyDivAccesses_ratio)
                      << "②" << setw(6) << FIXED_FLOAT2(lpm[i][L2C_type].mst_pureMissCyDivAccesses_ratio)
                      << "③" << setw(6) << FIXED_FLOAT2(lpm[i][LLC_type].mst_pureMissCyDivAccesses_ratio)

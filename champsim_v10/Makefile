@@ -37,7 +37,7 @@ BIN = ./$(binDir)/perceptron-$(L1D_Pf)-$(L2C_Pf)-$(LLC_Pf)-lru-$(CORES)core
 # Repeat trace file per core if CORES > 1
 TRACE_LIST := $(shell for i in $$(seq 1 $(CORES)); do echo -n "$(homo_traces) "; done)
 
-CFlags = -Wall -O3 -std=c++17 -D_DEFAULT_SOURCE -fno-omit-frame-pointer -g $(EXTRA_CFLAGS)
+CFlags = -Wall -g -O3 -std=c++17 -D_DEFAULT_SOURCE -fno-omit-frame-pointer  $(EXTRA_CFLAGS)
 # CFlags = -Wall -O0 -std=c++17 -D_DEFAULT_SOURCE -g -rdynamic -fno-omit-frame-pointer -fno-inline -fno-inline-functions -fno-optimize-sibling-calls # -fno-omit-frame-pointer -g
 
 #build_Wno-warnings:
