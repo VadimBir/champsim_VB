@@ -64,6 +64,10 @@ class CACHE : public MEMORY {
     uint64_t sim_hit_wByP[NUM_CPUS];      // same as sim_hit[cpu][LOAD]
     uint64_t sim_miss_wByP[NUM_CPUS];     // same as sim_miss[cpu][LOAD]
     uint64_t sim_byp_wByP[NUM_CPUS];      // = total_ByP_issued (duplicated for clean accounting)
+    uint64_t roi_access_wByP[NUM_CPUS];   // ROI snapshot of sim_access_wByP
+    uint64_t roi_hit_wByP[NUM_CPUS];      // ROI snapshot of sim_hit_wByP
+    uint64_t roi_miss_wByP[NUM_CPUS];     // ROI snapshot of sim_miss_wByP
+    uint64_t roi_byp_wByP[NUM_CPUS];      // ROI snapshot of sim_byp_wByP
 
 // VB: CCUSTOM CODE START
     // Cumulative post-warmup (for final stats, reset at warmup like sim_miss)
@@ -156,6 +160,10 @@ class CACHE : public MEMORY {
             sim_hit_wByP[i] = 0;
             sim_miss_wByP[i] = 0;
             sim_byp_wByP[i] = 0;
+            roi_access_wByP[i] = 0;
+            roi_hit_wByP[i] = 0;
+            roi_miss_wByP[i] = 0;
+            roi_byp_wByP[i] = 0;
         }
             lower_level = NULL;
             extra_interface = NULL;

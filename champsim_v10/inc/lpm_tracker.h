@@ -58,6 +58,7 @@ struct LPM_Tracker {
     double   roi_camat_activeMemCyDivAccesses_ratio;
     double   roi_apc_accessesDivActiveMemCy_ratio;
     double   roi_lpmr_activeMemCyDivIdealCy_ratio;
+    double   roi_mst_pureMissCyDivAccesses_ratio;          /* m/α            [eq 18] */
 
     /* --- bypass correction (L2C only) --- */
     uint64_t m_byp_l1d_pureMiss_cy;
@@ -67,6 +68,7 @@ struct LPM_Tracker {
     double   camat_activeMemCyDivAccesses_ratio;       /* ω/α            [eq 30] */
     double   apc_accessesDivActiveMemCy_ratio;          /* α/ω            [eq 32] */
     double   lpmr_activeMemCyDivIdealCy_ratio;         /* ω/(IC×CPIexe)  [eq 52] */
+    double   mst_pureMissCyDivAccesses_ratio;           /* m/α            [eq 18] */
 
     /* --- window-based counters (exponential decay every W_SIZE cycles) --- */
     static constexpr uint32_t W_SIZE = 512;
@@ -75,6 +77,7 @@ struct LPM_Tracker {
     double   w_c_amat_val;     /* windowed ω/α   */
     double   w_apc_val;        /* windowed α/ω   */
     double   w_lpmr_val;       /* windowed ω/ideal */
+    double   w_mst_val;        /* windowed m/α   */
 
     /* --- state --- */
     uint8_t  last_class;
@@ -84,10 +87,12 @@ struct LPM_Tracker {
         roi_h_pureHit_cy = roi_m_pureMiss_cy = roi_x_overlap_cy = roi_e_idle_cy = 0;
         roi_m_byp_l1d_pureMiss_cy = roi_m_byp_llc_pureMiss_cy = 0;
         roi_camat_activeMemCyDivAccesses_ratio = roi_apc_accessesDivActiveMemCy_ratio = roi_lpmr_activeMemCyDivIdealCy_ratio = 0.0;
+        roi_mst_pureMissCyDivAccesses_ratio = 0.0;
         camat_activeMemCyDivAccesses_ratio = apc_accessesDivActiveMemCy_ratio = lpmr_activeMemCyDivIdealCy_ratio = 0.0;
+        mst_pureMissCyDivAccesses_ratio = 0.0;
         w_h = w_m = w_x = w_e = 0;
         w_tick = 0;
-        w_c_amat_val = w_apc_val = w_lpmr_val = 0.0;
+        w_c_amat_val = w_apc_val = w_lpmr_val = w_mst_val = 0.0;
         last_class = LPM_CLASS_E;
     }
 
@@ -95,6 +100,7 @@ struct LPM_Tracker {
     void reset_sim() {
         h_pureHit_cy = m_pureMiss_cy = x_overlap_cy = e_idle_cy = m_byp_l1d_pureMiss_cy = m_byp_llc_pureMiss_cy = 0;
         camat_activeMemCyDivAccesses_ratio = apc_accessesDivActiveMemCy_ratio = lpmr_activeMemCyDivIdealCy_ratio = 0.0;
+        mst_pureMissCyDivAccesses_ratio = 0.0;
         /* NOTE: w_ counters NOT reset — they are windowed/decay, not cumulative */
     }
 
@@ -106,6 +112,7 @@ struct LPM_Tracker {
         roi_camat_activeMemCyDivAccesses_ratio = camat_activeMemCyDivAccesses_ratio;
         roi_apc_accessesDivActiveMemCy_ratio = apc_accessesDivActiveMemCy_ratio;
         roi_lpmr_activeMemCyDivIdealCy_ratio = lpmr_activeMemCyDivIdealCy_ratio;
+        roi_mst_pureMissCyDivAccesses_ratio = mst_pureMissCyDivAccesses_ratio;
     }
 
     inline void tick(bool ha, bool ma) {
@@ -152,6 +159,7 @@ struct LPM_Tracker {
         camat_activeMemCyDivAccesses_ratio = α ? (double)w / α  : 0.0;
         apc_accessesDivActiveMemCy_ratio    = w     ? (double)α / w  : 0.0;
         lpmr_activeMemCyDivIdealCy_ratio   = ideal ? (double)w / ideal  : 0.0;
+        mst_pureMissCyDivAccesses_ratio     = α ? (double)m_pureMiss_cy / α : 0.0;
     }
 
     /* Update windowed metrics. w_α_proxy = w_h+w_m+w_x (windowed access proxy).
@@ -161,6 +169,7 @@ struct LPM_Tracker {
         w_c_amat_val = w_α_proxy ? (double)ww / w_α_proxy : 0.0;
         w_apc_val    = ww            ? (double)w_α_proxy / ww  : 0.0;
         w_lpmr_val   = w_ideal       ? (double)ww / w_ideal        : 0.0;
+        w_mst_val    = w_α_proxy ? (double)w_m / w_α_proxy : 0.0;
     }
 
     inline uint64_t ω_numMemActiveCy()   const { return h_pureHit_cy + m_pureMiss_cy + x_overlap_cy; }
@@ -256,8 +265,8 @@ inline double lpm_apc(int cpu, uint8_t ct, uint64_t α) {
     uint64_t w = lpm[cpu][ct].ω_numMemActiveCy();
     return w ? (double)α / w : 0.0;
 }
-inline double lpm_mst(int cpu, uint64_t α_l1d) {
-    return α_l1d ? (double)lpm[cpu][LPM_L1D].m_pureMiss_cy / α_l1d : 0.0;
+inline double lpm_mst(int cpu, uint8_t ct, uint64_t α) {
+    return α ? (double)lpm[cpu][ct].m_pureMiss_cy / α : 0.0;
 }
 
 /*-----------------------------------------------------------------
@@ -367,10 +376,10 @@ inline double get_LPMR_global_roi_byp(int cpu) {
 inline void lpm_print(int cpu) {
     static const char* nm[] = {"ITLB","DTLB","STLB","L1I ","L1D ","L2C ","LLC ","DRAM"};
     printf("\n=== LPM Cycle Classification  CPU %d (ROI) ===\n", cpu);
-    printf("%-4s %12s %12s %12s %12s | %12s %8s %8s %8s | %10s %10s | %8s %8s\n",
+    printf("%-4s %12s %12s %12s %12s | %12s %8s %8s %8s | %10s %10s | %8s %8s %8s\n",
            "Lvl", "h(hit)", "m(miss)", "x(mixed)", "e(idle)",
            "omega", "mu", "kappa", "phi", "LPMR_std", "LPMR_byp",
-           "C-AMAT", "APC");
+           "C-AMAT", "APC", "MST");
     for (int t = 0; t < LPM_NUM_TYPES; t++) {
         const LPM_Tracker& s = lpm[cpu][t];
         if (s.roi_num_totalCy() == 0) continue;
@@ -378,11 +387,12 @@ inline void lpm_print(int cpu) {
                nm[t], s.roi_h_pureHit_cy, s.roi_m_pureMiss_cy, s.roi_x_overlap_cy, s.roi_e_idle_cy, s.roi_ω_numMemActiveCy(),
                s.roi_µ_sumMissOverlapCyDivMemActiveCy_ratio(), s.roi_κ_pureMissCyDivSumMissOverlapCy_ratio(), s.roi_φ_sumPureHitOverlapCyDivMemActiveCy_ratio());
         if (t >= LPM_L1D)
-            printf(" | %10.6f %10.6f | %8.4f %8.4f",
+            printf(" | %10.6f %10.6f | %8.4f %8.4f %8.4f",
                    get_LPMR_roi_std(cpu, t), get_LPMR_roi_byp(cpu, t),
-                   s.roi_camat_activeMemCyDivAccesses_ratio, s.roi_apc_accessesDivActiveMemCy_ratio);
+                   s.roi_camat_activeMemCyDivAccesses_ratio, s.roi_apc_accessesDivActiveMemCy_ratio,
+                   s.roi_mst_pureMissCyDivAccesses_ratio);
         else
-            printf(" | %10s %10s | %8s %8s", "n/a","n/a","n/a","n/a");
+            printf(" | %10s %10s | %8s %8s %8s", "n/a","n/a","n/a","n/a","n/a");
         printf("\n");
     }
     printf("Global LPMR_std: %.6f  LPMR_byp: %.6f\n",

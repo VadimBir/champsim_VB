@@ -148,6 +148,7 @@ fi
 mkdir -p "$ROOT/bin"
 
 BINARY_NAME="${BRANCH}-${L1D_PREFETCHER}-${L2C_PREFETCHER}-${LLC_PREFETCHER}-${LLC_REPLACEMENT}-${NUM_CORE}core"
+rm -f "$ROOT/bin/${BINARY_NAME}"
 cp "$WORKDIR/bin/champsim" "$ROOT/bin/${BINARY_NAME}"
 
 echo ""

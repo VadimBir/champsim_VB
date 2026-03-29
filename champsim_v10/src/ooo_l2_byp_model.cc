@@ -38,12 +38,8 @@ static bool l2_bypass_init = false;
 #define SHALL_L2C_BYPASS_DEFINED
 inline bool l2c_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
     if (l2_bypass_init == false){
-        cout << "Bypass on WINDOW: \navailable = (double)free * camat\nrq_unmatch = 1.0 - (lpmr_l2c / lpmr_l1d) \npq_unmatch = 1.0 - (lpmr_llc / lpmr_l2c) \nimmediate = (double)L2C->RQ.occupancy * rq_unmatch * camat + (double)L2C->PQ.occupancy * pq_unmatch * camat \nfuture = apc_l1d * (lpmr_l2c / lpmr_l1d) * camat + camat;" << endl;
-        
+        cout << "Bypass on: \nNO BYBPASS LOGIC" << endl;
         l2_bypass_init = true;
     }
-
-    if (LLC->MSHR.occupancy < LLC->MSHR.SIZE/2 && L2C->MSHR.occupancy < L2C->MSHR.SIZE/2)
-        return true;
     return false;
 }

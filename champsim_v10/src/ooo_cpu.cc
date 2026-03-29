@@ -1195,25 +1195,25 @@ void O3_CPU::operate_lsq()
     // handle store
     uint32_t store_issued = 0, num_iteration = 0;
 
+    PACKET sq_data_packet = SQ_TLB_DATA_TEMPLATE;
     while (store_issued < SQ_WIDTH) {
         if (RTS0[RTS0_head] < SQ_SIZE) {
             uint16_t sq_index = RTS0[RTS0_head];
             if (SQ.entry[sq_index].event_cycle <= current_core_cycle[cpu]) {
 
                 // add it to DTLB
-                PACKET data_packet = SQ_TLB_DATA_TEMPLATE;
-                data_packet.cpu = cpu;
-                data_packet.data_index = SQ.entry[sq_index].data_index;
-                data_packet.sq_index = sq_index;
-                data_packet.address = SQ.entry[sq_index].virtual_address >> LOG2_PAGE_SIZE;
-                data_packet.full_addr = SQ.entry[sq_index].virtual_address;
-                data_packet.instr_id = SQ.entry[sq_index].instr_id;
-                data_packet.rob_index = SQ.entry[sq_index].rob_index;
-                data_packet.ip = SQ.entry[sq_index].ip;
-                data_packet.asid[0] = SQ.entry[sq_index].asid[0];
-                data_packet.asid[1] = SQ.entry[sq_index].asid[1];
-                data_packet.event_cycle = SQ.entry[sq_index].event_cycle;
-                int rq_index = DTLB.add_rq(&data_packet);
+                sq_data_packet.cpu = cpu;
+                sq_data_packet.data_index = SQ.entry[sq_index].data_index;
+                sq_data_packet.sq_index = sq_index;
+                sq_data_packet.address = SQ.entry[sq_index].virtual_address >> LOG2_PAGE_SIZE;
+                sq_data_packet.full_addr = SQ.entry[sq_index].virtual_address;
+                sq_data_packet.instr_id = SQ.entry[sq_index].instr_id;
+                sq_data_packet.rob_index = SQ.entry[sq_index].rob_index;
+                sq_data_packet.ip = SQ.entry[sq_index].ip;
+                sq_data_packet.asid[0] = SQ.entry[sq_index].asid[0];
+                sq_data_packet.asid[1] = SQ.entry[sq_index].asid[1];
+                sq_data_packet.event_cycle = SQ.entry[sq_index].event_cycle;
+                int rq_index = DTLB.add_rq(&sq_data_packet);
 
                 if (rq_index == -2)
                     break;

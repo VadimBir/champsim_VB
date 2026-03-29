@@ -42,6 +42,7 @@
 #define STR_APC        "APC "
 #define STR_LPM         "LPM "
 #define STR_cAMT        "cAMT "
+#define STR_MST         "MST "
 #define STR_MSHR_OCCUPANCY_PERCENT       "MSHR%"
 #define STR_LOAD_HIT_RATE       "LoadH%"
 #define STR_TIME           "⏱"
@@ -269,6 +270,10 @@ void record_roi_stats(uint16_t cpu, CACHE *cache) {
         cache->roi_hit[cpu][i] = cache->sim_hit[cpu][i];
         cache->roi_miss[cpu][i] = cache->sim_miss[cpu][i];
     }
+    cache->roi_access_wByP[cpu] = cache->sim_access_wByP[cpu];
+    cache->roi_hit_wByP[cpu]    = cache->sim_hit_wByP[cpu];
+    cache->roi_miss_wByP[cpu]   = cache->sim_miss_wByP[cpu];
+    cache->roi_byp_wByP[cpu]    = cache->sim_byp_wByP[cpu];
 }
 double print_pf_hitRatio(uint16_t cpu, CACHE *cache) {
     //cout<< "Core_" << cpu << "_" << cache->NAME << "_prefetch_useful " << cache->pf_useful << " "<<cache->NAME<< "_Total_Hit Ratio: " << (double)cache->pf_useful/(double)cache->pf_issued << endl;
@@ -308,7 +313,8 @@ void print_roi_stats(uint16_t cpu, CACHE *cache) {
     << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";byp_issued" << ";" << std::right << setw(10) << cache->total_ByP_issued[cpu] << ";"
     << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";APC" << ";" << std::right << setw(10) << lpm[cpu][cache->cache_type].apc_accessesDivActiveMemCy_ratio << ";"
     << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";LPM" << ";" << std::right << setw(10) << lpm[cpu][cache->cache_type].lpmr_activeMemCyDivIdealCy_ratio << ";"
-    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";C-AMAT" << ";" << std::right << setw(10) << lpm[cpu][cache->cache_type].camat_activeMemCyDivAccesses_ratio << ";" << endl
+    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";C-AMAT" << ";" << std::right << setw(10) << lpm[cpu][cache->cache_type].camat_activeMemCyDivAccesses_ratio << ";"
+    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";MST" << ";" << std::right << setw(10) << lpm[cpu][cache->cache_type].mst_pureMissCyDivAccesses_ratio << ";" << endl
     
     // #ifdef BYPASS_L1_LOGIC
     //     if (cache->cache_type == IS_L1D)
@@ -333,11 +339,11 @@ void print_roi_stats(uint16_t cpu, CACHE *cache) {
     << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";load_hit" << ";" <<std::right << setw(10) << cache->roi_hit[cpu][0] << ";"
     << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";load_miss" << ";" <<std::right << setw(10) << cache->roi_miss[cpu][0] << ";" 
     << cache->NAME<< "_load_HitR: " << (double)cache->roi_hit[cpu][0]/(double)cache->roi_access[cpu][0]<< ";"<< endl
-    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";load_wByP_acc" << ";" <<std::right << setw(10) << cache->sim_access_wByP[cpu] << ";"
-    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";load_wByP_hit" << ";" <<std::right << setw(10) << cache->sim_hit_wByP[cpu] << ";"
-    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";load_wByP_byp" << ";" <<std::right << setw(10) << cache->sim_byp_wByP[cpu] << ";"
-    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";load_wByP_miss" << ";" <<std::right << setw(10) << cache->sim_miss_wByP[cpu] << ";"
-    << cache->NAME<< "_load_wByP_HitR: " << (cache->sim_access_wByP[cpu] ? (double)cache->sim_hit_wByP[cpu]/(double)cache->sim_access_wByP[cpu] : 0.0) << ";"<< endl
+    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";load_wByP_acc" << ";" <<std::right << setw(10) << cache->roi_access_wByP[cpu] << ";"
+    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";load_wByP_hit" << ";" <<std::right << setw(10) << cache->roi_hit_wByP[cpu] << ";"
+    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";load_wByP_byp" << ";" <<std::right << setw(10) << cache->roi_byp_wByP[cpu] << ";"
+    << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";load_wByP_miss" << ";" <<std::right << setw(10) << cache->roi_miss_wByP[cpu] << ";"
+    << cache->NAME<< "_load_wByP_HitR: " << (cache->roi_access_wByP[cpu] ? (double)cache->roi_hit_wByP[cpu]/(double)cache->roi_access_wByP[cpu] : 0.0) << ";"<< endl
     << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";RFOs" << ";" <<std::right << setw(10) << cache->roi_access[cpu][1] << ";"
     << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";RFO_hit" << ";" <<std::right << setw(10) << cache->roi_hit[cpu][1] << ";"
     << "Core_;" << cpu << ";" << std::right << setw(4) << cache->NAME << ";_" << setw(14) << ";RFO_miss" << ";" <<std::right << setw(10) << cache->roi_miss[cpu][1] << ";" 
@@ -1528,7 +1534,7 @@ if (num_instr_dest == 2) {
 
                 // schedule (including decode latency)
                 uint32_t schedule_index = ooo_cpu[i].ROB.next_schedule;
-                
+
                 if (!(rob_events.raw[i][schedule_index] & (COMPLETE_schedule_t | INFLIGHT_schedule_t)) && (rob_events.entries[i][schedule_index].event_cycle <= current_core_cycle[i]))
                     ooo_cpu[i].schedule_instruction();
                 // memory operation
@@ -1592,16 +1598,23 @@ if (num_instr_dest == 2) {
                      << "②" << setw(6) << FIXED_FLOAT2(lpm[i][L2C_type].camat_activeMemCyDivAccesses_ratio)
                      << "③" << setw(6) << FIXED_FLOAT2(lpm[i][LLC_type].camat_activeMemCyDivAccesses_ratio)
                      << "Ⓜ" << setw(6) << FIXED_FLOAT2(lpm[i][DRAM_type].camat_activeMemCyDivAccesses_ratio)
-                     << left 
+                     << left
+                     << " " STR_MST
+                     << "⚙" << setw(5) << FIXED_FLOAT2(lpm[i][L1D_type].mst_pureMissCyDivAccesses_ratio)
+                     << "①" << setw(6) << FIXED_FLOAT2(lpm[i][L1D_type].mst_pureMissCyDivAccesses_ratio)
+                     << "②" << setw(6) << FIXED_FLOAT2(lpm[i][L2C_type].mst_pureMissCyDivAccesses_ratio)
+                     << "③" << setw(6) << FIXED_FLOAT2(lpm[i][LLC_type].mst_pureMissCyDivAccesses_ratio)
+                     << "Ⓜ" << setw(6) << FIXED_FLOAT2(lpm[i][DRAM_type].mst_pureMissCyDivAccesses_ratio)
+                     << left
                      << " " << STR_MSHR_OCCUPANCY_PERCENT
                      << setw(3) << right << (int)(((float)ooo_cpu[i].L1D.MSHR.occupancy/(float)ooo_cpu[i].L1D.MSHR.SIZE)*100)
                      << setw(3) << right << (int)(((float)ooo_cpu[i].L2C.MSHR.occupancy/(float)ooo_cpu[i].L2C.MSHR.SIZE)*100)
                      << setw(3) << right << (int)(((float)uncore.LLC.MSHR.occupancy/(float)uncore.LLC.MSHR.SIZE)*100)
-                     << left << " " << STR_LOAD_HIT_RATE
-                     << setw(3) << right << (int)(((float)ooo_cpu[i].L1D.sim_hit[i][0]/(float)ooo_cpu[i].L1D.sim_access[i][0])*100)
-                     << setw(3) << right << (int)(((float)ooo_cpu[i].L2C.sim_hit[i][0]/(float)ooo_cpu[i].L2C.sim_access[i][0])*100)
-                     << setw(3) << right << (int)(((float)uncore.LLC.sim_hit[i][0]/(float)uncore.LLC.sim_access[i][0])*100)
-                     << " LdBH%"
+                    //  << left << " " << STR_LOAD_HIT_RATE
+                    //  << setw(3) << right << (int)(((float)ooo_cpu[i].L1D.sim_hit[i][0]/(float)ooo_cpu[i].L1D.sim_access[i][0])*100)
+                    //  << setw(3) << right << (int)(((float)ooo_cpu[i].L2C.sim_hit[i][0]/(float)ooo_cpu[i].L2C.sim_access[i][0])*100)
+                    //  << setw(3) << right << (int)(((float)uncore.LLC.sim_hit[i][0]/(float)uncore.LLC.sim_access[i][0])*100)
+                     << " LoadByPH%"
                      << setw(3) << right << (int)(ooo_cpu[i].L1D.sim_access_wByP[i] ? ((float)ooo_cpu[i].L1D.sim_hit_wByP[i]/(float)ooo_cpu[i].L1D.sim_access_wByP[i])*100 : 0)
                      << setw(3) << right << (int)(ooo_cpu[i].L2C.sim_access_wByP[i] ? ((float)ooo_cpu[i].L2C.sim_hit_wByP[i]/(float)ooo_cpu[i].L2C.sim_access_wByP[i])*100 : 0)
                      << setw(3) << right << (int)(uncore.LLC.sim_access_wByP[i] ? ((float)uncore.LLC.sim_hit_wByP[i]/(float)uncore.LLC.sim_access_wByP[i])*100 : 0)
@@ -1737,7 +1750,8 @@ if (num_instr_dest == 2) {
         lpm_print(i);
         cout << "Core_;" << i << ";DRAM;_;APC;" << lpm[i][DRAM_type].apc_accessesDivActiveMemCy_ratio << ";"
              << "Core_;" << i << ";DRAM;_;LPM;" << lpm[i][DRAM_type].lpmr_activeMemCyDivIdealCy_ratio << ";"
-             << "Core_;" << i << ";DRAM;_;C-AMAT;" << lpm[i][DRAM_type].camat_activeMemCyDivAccesses_ratio << ";" << endl;
+             << "Core_;" << i << ";DRAM;_;C-AMAT;" << lpm[i][DRAM_type].camat_activeMemCyDivAccesses_ratio << ";"
+             << "Core_;" << i << ";DRAM;_;MST;" << lpm[i][DRAM_type].mst_pureMissCyDivAccesses_ratio << ";" << endl;
     }
 
     for (uint32_t i=0; i<NUM_CPUS; i++) {
