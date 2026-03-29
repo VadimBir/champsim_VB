@@ -38,8 +38,8 @@ inline bool l2c_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
     double camat_cur  = lpm[cpu][L2C_type].camat_activeMemCyDivAccesses_ratio;
     double camat_next = lpm[cpu][LLC_type].camat_activeMemCyDivAccesses_ratio;
 
-    double h2 = lpm[cpu][L2C_type].h;
-    double m2 = lpm[cpu][L2C_type].m;
+    double h2 = lpm[cpu][L2C_type].h_pureHit_cy;
+    double m2 = lpm[cpu][L2C_type].m_pureMiss_cy;
     if (m2 < 1.0) m2 = 1.0;
     double camat_per_miss_cur = camat_cur * (h2 + m2) / m2;
 

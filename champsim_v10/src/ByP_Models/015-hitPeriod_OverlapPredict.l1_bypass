@@ -1,0 +1,55 @@
+#include "cache.h"
+#include "lpm_tracker.h"
+
+#ifndef L1D_type
+#define L1D_type  4
+#define L2C_type  5
+#define LLC_type  6
+#endif
+
+static bool l1_bypass_init = false;
+
+
+// ============================================================
+// METHOD 6: HIT PERIODICITY / OVERLAP PREDICTION
+// Core idea: hits arrive with a windowed period T_h = w_total / w_h_count.
+// If a new miss has latency camat_next > T_h, it WILL overlap with
+// upcoming hit traffic — keep it (don't bypass).
+// If camat_next < T_h, miss completes in a gap between hits — no
+// overlap benefit from filling — bypass.
+// [Eq13: phi = h/(h+m+x+e); high phi = dense hit stream]
+// [Eq37: ci proportional to hit density — more hits = more concurrency]
+//
+// proxy for T_h: camat_current / max(phi, eps)
+//   phi = w_h / (w_h + w_m + w_x + w_e)   [windowed hit fraction]
+//   T_h_approx = camat_current / phi
+// bypass iff camat_next < T_h_approx
+//           = camat_next * phi < camat_current
+// ============================================================
+
+// --- M6 L1D ---
+inline bool l1d_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (!l1_bypass_init) {
+        cout << "L1D Bypass [ng][M6 Hit Periodicity / Overlap Predict]:\n"
+             << "  T_h_approx = camat_L1D / phi_L1D  [Eq13,37]\n"
+             << "  bypass iff camat_L2C < T_h  => miss completes in hit gap\n"
+             << "  equiv: camat_L2C * phi_L1D < camat_L1D\n";
+        l1_bypass_init = true;
+    }
+    if (L2C->RQ.occupancy >= L2C->RQ.SIZE) return false;
+
+    const auto& t1 = lpm[cpu][L1D_type];
+    const auto& t2 = lpm[cpu][L2C_type];
+
+    double total = t1.w_h + t1.w_m + t1.w_x + t1.w_e;
+    if (total <= 0.0) return false;
+    double phi = t1.w_h / total;
+    if (phi <= 0.0) return false;  // no hits at all — no period to predict
+
+    double camat_cur  = t1.camat_activeMemCyDivAccesses_ratio;
+    double camat_next = t2.camat_activeMemCyDivAccesses_ratio;
+    if (camat_cur <= 0.0 || camat_next <= 0.0) return false;
+
+    // bypass iff miss at next level completes before next hit arrives
+    return (camat_next * phi) < camat_cur;
+}

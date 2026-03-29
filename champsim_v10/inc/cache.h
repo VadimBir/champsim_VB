@@ -845,11 +845,27 @@ class CACHE : public MEMORY {
             if (PROCESSED.occupancy < PROCESSED.SIZE)
                 PROCESSED.add_queue(&MSHR.entry[mshr_index]);
             else { cerr << "L2C PROCESSED FULL" << endl; assert(0&&"RETURN IS LOST FOREVER!!!! "); }
+            // PF from L1D merged into this bypassed MSHR — complete L1D's prefetch MSHR.
+            // Guard: only if L1D still has an MSHR for this address (may have been resolved by other path).
+            // Use PREFETCH type to avoid promotion to LOAD at L1D (prevents double CPU signal).
+            if (MSHR.entry[mshr_index].pf_merged_from_upper
+                    && ((CACHE *)upper_level_dcache[fill_cpu])->probe_mshr(&MSHR.entry[mshr_index]) != -1) {
+                PACKET pf_ret = MSHR.entry[mshr_index];
+                pf_ret.type = PREFETCH;
+                return_to_upper_level(pf_ret);
+            }
         }
 #endif
 #ifdef BYPASS_L2_LOGIC
         else if ((cache_type == IS_LLC) && (MSHR.entry[mshr_index].type == LOAD) && MSHR.entry[mshr_index].l2_bypassed == 1) {
             upper_level_dcache[fill_cpu]->upper_level_dcache[fill_cpu]->return_data(&MSHR.entry[mshr_index]);
+            // PF from L2C merged into this bypassed MSHR — complete L2C's prefetch MSHR.
+            // Guard: only if L2C still has an MSHR for this address.
+            // L2C has no type-promotion, so the MSHR stays PREFETCH → fills cache, no L1D forward.
+            if (MSHR.entry[mshr_index].pf_merged_from_upper
+                    && ((CACHE *)upper_level_dcache[fill_cpu])->probe_mshr(&MSHR.entry[mshr_index]) != -1) {
+                return_to_upper_level(MSHR.entry[mshr_index]);
+            }
         }
 #endif
     }

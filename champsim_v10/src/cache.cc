@@ -270,6 +270,7 @@ void CACHE::merge_with_prefetch(PACKET &mshr_packet, PACKET &queue_packet) {
 #ifdef BYPASS_LLC_LOGIC
     uint8_t prior_llc_bypassed = mshr_packet.llc_bypassed;
 #endif
+    uint8_t prior_pf_merged = mshr_packet.pf_merged_from_upper;
     mshr_packet = queue_packet;
     // restore original retained data
     mshr_packet.returned = prior_returned;
@@ -284,6 +285,7 @@ void CACHE::merge_with_prefetch(PACKET &mshr_packet, PACKET &queue_packet) {
 #ifdef BYPASS_LLC_LOGIC
     mshr_packet.llc_bypassed = prior_llc_bypassed;
 #endif
+    mshr_packet.pf_merged_from_upper = prior_pf_merged;
 }
 
 void CACHE::handle_writeback() {
@@ -598,25 +600,18 @@ void CACHE::handle_prefetch() {
                             }
                     #ifdef BYPASS_L1_LOGIC
                         else if (MSHR.entry[mshr_index].l1_bypassed == 1) {
-                            // PQ wants fill=1 but MSHR is bypass LOAD with no L1D MSHR.
-                            // Downgrade fill_level so return_data reaches L1D,
-                            // BUT only if L1D has an MSHR for this address (from prefetch).
-                            auto *l1d = (CACHE *) this->upper_level_dcache[cpu];
-                            if (l1d->probe_mshr(&PQ.entry[index]) != -1) {
-                                // L1D has MSHR (prefetch) — safe to redirect through L1D
-                                MSHR.entry[mshr_index].fill_level = PQ.entry[index].fill_level;
-                                MSHR.entry[mshr_index].l1_bypassed = 0;
-                            }
-                            // else: no L1D MSHR — keep ByP=1, complete via L2C.PROCESSED
+                            // PQ (prefetch) merge: do NOT clear l1_bypassed or downgrade fill_level.
+                            // Upper cache (L1D) may only have a prefetch MSHR that won't route
+                            // data to CPU. Tag for MSHR cleanup on the return path instead.
+                            MSHR.entry[mshr_index].pf_merged_from_upper = 1;
                         }
                     #endif
                     #ifdef BYPASS_L2_LOGIC
                         else if (MSHR.entry[mshr_index].l2_bypassed == 1) {
-                            auto *l2c = (CACHE *) this->upper_level_dcache[cpu];
-                            if (l2c->probe_mshr(&PQ.entry[index]) != -1) {
-                                MSHR.entry[mshr_index].fill_level = PQ.entry[index].fill_level;
-                                MSHR.entry[mshr_index].l2_bypassed = 0;
-                            }
+                            // PQ (prefetch) merge: do NOT clear l2_bypassed or downgrade fill_level.
+                            // L2C may only have a prefetch MSHR (fill_level=FILL_L2) that won't
+                            // forward to L1D. Tag for MSHR cleanup on the return path instead.
+                            MSHR.entry[mshr_index].pf_merged_from_upper = 1;
                         }
                     #endif
                         }

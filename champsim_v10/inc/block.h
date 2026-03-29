@@ -119,6 +119,7 @@ public:
     uint8_t l1_bypassed = 0;
     uint8_t l2_bypassed = 0;
     uint8_t llc_bypassed = 0;
+    uint8_t pf_merged_from_upper = 0; // PF from upper level merged into bypassed MSHR
     uint8_t exist_lvls = 0;
 
     int pf_origin_level : 4, rob_index : 12;
@@ -232,6 +233,7 @@ public:
         dest.l1_bypassed = src.l1_bypassed;
         dest.l2_bypassed = src.l2_bypassed;
         dest.llc_bypassed = src.llc_bypassed;
+        dest.pf_merged_from_upper = src.pf_merged_from_upper;
         dest.fill_level = src.fill_level;
     }
     template <typename T>
@@ -262,6 +264,7 @@ public:
         l1_bypassed = 0;
         l2_bypassed = 0;
         llc_bypassed = 0;
+        pf_merged_from_upper = 0;
         exist_lvls = 0;
 
         rob_index_depend_on_me.clear();

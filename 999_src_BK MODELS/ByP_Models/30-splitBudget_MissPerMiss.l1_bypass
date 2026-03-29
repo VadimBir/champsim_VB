@@ -1,0 +1,55 @@
+#include "cache.h"
+#include "lpm_tracker.h"
+
+#ifndef L1D_type
+#define L1D_type  4
+#define L2C_type  5
+#define LLC_type  6
+#endif
+
+// MODEL 30 (Claude): SPLIT BUDGET — miss-denominated at both levels
+// Bypassing a miss has TWO effects:
+//   1. Creates a free slot at next level: free_next * camat_per_miss_next
+//   2. Frees a slot at current level (MSHR not consumed): 1 * camat_per_miss_cur
+// total available = free_next * camat_per_miss_next + camat_per_miss_cur
+// vs cost = immediate + future + entry (all in camat_next units — next level cost)
+// NOTE: mixes units (cur vs next) — but directionally correct: bypass gain is dual
+
+static bool l1_bypass_init = false;
+
+inline bool l1d_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (l1_bypass_init == false) {
+        cout << "L1D Bypass [30 Split Budget miss-per-miss]:\n"
+             << "  avail = free_L2C*camat_per_miss_L2C + camat_per_miss_L1D\n"
+             << "  cost  = immediate + future + entry  (camat_L2C units)\n";
+        l1_bypass_init = true;
+    }
+
+    if (L1D->MSHR.occupancy < L1D->MSHR.SIZE) return false;
+
+    uint32_t free = L2C->MSHR.SIZE - L2C->MSHR.occupancy;
+    if (free == 0) return false;
+
+    double camat_cur  = lpm[cpu][L1D_type].camat_activeMemCyDivAccesses_ratio;
+    double camat_next = lpm[cpu][L2C_type].camat_activeMemCyDivAccesses_ratio;
+
+    double h1 = lpm[cpu][L1D_type].h; double m1 = lpm[cpu][L1D_type].m;
+    double h2 = lpm[cpu][L2C_type].h; double m2 = lpm[cpu][L2C_type].m;
+    if (m1 < 1.0) m1 = 1.0;
+    if (m2 < 1.0) m2 = 1.0;
+
+    double cpm_cur  = camat_cur  * (h1 + m1) / m1;
+    double cpm_next = camat_next * (h2 + m2) / m2;
+
+    double lpmr_l1d = lpm[cpu][L1D_type].lpmr_activeMemCyDivIdealCy_ratio;
+    double lpmr_l2c = lpm[cpu][L2C_type].lpmr_activeMemCyDivIdealCy_ratio;
+    if (lpmr_l1d < 0.001) lpmr_l1d = 0.001;
+    if (lpmr_l2c < 0.001) lpmr_l2c = 0.001;
+
+    double available = (double)free * cpm_next + cpm_cur;
+    double immediate = (double)(L2C->RQ.occupancy + L2C->PQ.occupancy) * camat_next;
+    double future    = (lpmr_l2c / lpmr_l1d) * camat_next;
+    double entry     = camat_next;
+
+    return available > (immediate + future + entry);
+}

@@ -38,8 +38,8 @@ inline bool llc_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
 
     double camat = lpm[cpu][LLC_type].camat_activeMemCyDivAccesses_ratio;
 
-    double h3 = lpm[cpu][LLC_type].h;
-    double m3 = lpm[cpu][LLC_type].m;
+    double h3 = lpm[cpu][LLC_type].h_pureHit_cy;
+    double m3 = lpm[cpu][LLC_type].m_pureMiss_cy;
     if (m3 < 1.0) m3 = 1.0;
     double camat_per_miss = camat * (h3 + m3) / m3;
 

@@ -1,0 +1,82 @@
+#include "cache.h"
+#include "lpm_tracker.h"
+
+#ifndef L1D_type
+#define L1D_type  4
+#define L2C_type  5
+#define LLC_type  6
+#endif
+
+// MODEL 001: µ·κ pure-miss-fraction bypass
+//
+// Paper foundation:
+//   µ(l) = (m+x)/ω  — miss cycles over active cycles           [eq 14]
+//   κ(l) = m/(m+x)  — pure miss cycles over all miss cycles    [eq 15]
+//   µ·κ  = m/ω      — pure miss fraction of active time
+//   MST  = m/α      — stall cycles per access                  [eq 18]
+//   APC  = α/ω      — accesses per active cycle (throughput)    [eq 32]
+//
+// Decision: bypass when:
+//   1. Current MSHR full (stall imminent)
+//   2. Next level has MSHR capacity
+//   3. Pure miss fraction (µ·κ) at current level is high enough
+//      that eliminating the MSHR entry is worth losing the fill
+//   4. Next level isn't already saturated (its µ·κ isn't too high)
+//
+// The key tradeoff:
+//   BENEFIT: avoid pure miss stall at current level
+//   COST:   lose cache line → future re-miss → more accesses at next level
+//
+// We bypass when current level is miss-dominated AND next level
+// has headroom to absorb the extra traffic.
+
+static bool l1_bypass_init = false;
+
+inline bool l1d_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (l1_bypass_init == false) {
+        cout << "L1D Bypass [ng][001-lpm_muKappa]:\n"
+             << "  Gate: L1D MSHR full, L2C MSHR has space\n"
+             << "  Signal: µ·κ (pure miss fraction) at L1D\n"
+             << "  Guard: L2C µ·κ must have headroom\n";
+        l1_bypass_init = true;
+    }
+
+    // Gate 2: next level must have capacity
+    uint32_t free_next = L2C->MSHR.SIZE - L2C->MSHR.occupancy;
+    if (free_next == 0) return false;
+
+    // µ·κ at current level = m/ω = pure miss fraction
+    double mk_cur = lpm[cpu][L1D_type].µ_sumMissOverlapCyDivMemActiveCy_ratio()
+                   * lpm[cpu][L1D_type].κ_pureMissCyDivSumMissOverlapCy_ratio();
+
+    // µ·κ at next level
+    double mk_next = lpm[cpu][L2C_type].µ_sumMissOverlapCyDivMemActiveCy_ratio()
+                    * lpm[cpu][L2C_type].κ_pureMissCyDivSumMissOverlapCy_ratio();
+
+    // MST at current level — stall damage per access
+    double mst_cur = lpm[cpu][L1D_type].mst_pureMissCyDivAccesses_ratio;
+
+    // APC at next level — throughput capacity
+    double apc_next = lpm[cpu][L2C_type].apc_accessesDivActiveMemCy_ratio;
+
+    // Decision logic:
+    // Bypass if current level is miss-heavy (mk_cur > threshold)
+    // AND next level has headroom (mk_next < saturation)
+    // AND the stall cost is significant (mst_cur > minimum)
+    //
+    // Threshold: if >30% of active cycles are pure miss, bypass helps
+    // Saturation: if next level >70% pure miss, don't add more pressure
+    // MST minimum: if stalls are negligible (<0.5 cy/access), don't bother
+
+    if (mk_cur < 0.30) return false;   // not enough miss pressure
+    if (mk_next > 0.70) return false;  // next level already saturated
+    if (mst_cur < 0.5)  return false;  // stalls are negligible
+
+    // Scale bypass aggressiveness by how much MSHR capacity next level has
+    // More free slots → more confident in bypassing
+    double capacity_ratio = (double)free_next / L2C->MSHR.SIZE;
+
+    // Bypass if: pure miss damage * capacity headroom exceeds the
+    // cost of losing the fill (approximated as next level's miss pressure)
+    return (mk_cur * capacity_ratio) > mk_next;
+}

@@ -1,0 +1,48 @@
+#include "cache.h"
+#include "lpm_tracker.h"
+
+#ifndef L1D_type
+#define L1D_type  4
+#define L2C_type  5
+#define LLC_type  6
+#endif
+
+static bool llc_bypass_init = false;
+
+
+// ============================================================
+// METHOD 8 (Claude): φ FILL-REUSE vs MISS-GAIN BALANCE
+// bypass iff miss_gain > fill_value
+// [Eq13,27,35 — no DRAM tracker: use camat_LLC as camat_next]
+// ============================================================
+
+// --- M8 LLC ---
+inline bool llc_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (!llc_bypass_init) {
+        cout << "LLC Bypass [M8 phi Fill-Reuse vs Miss-Gain]:\n"
+             << "  fill_value = phi_LLC * (w_h_LLC / acc_LLC)  [Eq13,27]\n"
+             << "  miss_gain  = w_mu_LLC * w_kappa_LLC * camat_LLC  [Eq35]\n"
+             << "  bypass iff miss_gain > fill_value\n";
+        llc_bypass_init = true;
+    }
+    if (LLC->RQ.occupancy >= LLC->RQ.SIZE) return false;
+
+    const auto& t3 = lpm[cpu][LLC_type];
+
+    double total = t3.w_h + t3.w_m + t3.w_x + t3.w_e;
+    if (total <= 0.0) return false;
+    double phi = t3.w_h / total;
+
+    double acc = t3.w_h + t3.w_m;
+    if (acc <= 0.0) return false;
+    double h_cy_per_acc = t3.w_h / acc;
+
+    double fill_value = phi * h_cy_per_acc;
+
+    double camat = t3.camat_activeMemCyDivAccesses_ratio;
+    double miss_gain = t3.w_µ_sumMissOverlapCyDivMemActiveCy_ratio()
+                     * t3.w_κ_pureMissCyDivSumMissOverlapCy_ratio()
+                     * camat;
+
+    return miss_gain > fill_value;
+}

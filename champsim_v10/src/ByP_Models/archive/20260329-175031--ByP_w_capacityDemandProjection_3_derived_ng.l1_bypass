@@ -1,0 +1,75 @@
+#include "cache.h"
+#include "lpm_tracker.h"
+
+// USEFUL VARS:
+//  * lpm[cpu][IS_L1D].camat_activeMemCyDivAccesses_ratio   <- w(L1D)/a(L1D)  [hits+misses in denom]
+//  * lpm[cpu][IS_L1D].apc_accessesDivActiveMemCy_ratio     <- a(L1D)/w(L1D)
+//  * lpm[cpu][IS_L1D].lpmr_activeMemCyDivIdealCy_ratio     <- w(L1D)/(IC*CPIexe)
+//  * lpm[cpu][IS_L2C].µ_sumMissOverlapCyDivMemActiveCy_ratio()
+//  * lpm[cpu][IS_L2C].k_pureMissCyDivSumMissOverlapCy_ratio()
+//  * lpm[cpu][IS_L1D].h, .m, .x, .e
+//  * lpm[cpu][IS_L1D].w_numMemActiveCy()
+
+// L1D->MSHR.occupancy      L1D->MSHR.SIZE
+// L2C->MSHR.occupancy      L2C->MSHR.SIZE
+// L2C->RQ.occupancy        L2C->RQ.SIZE
+// L2C->PQ.occupancy        L2C->PQ.SIZE
+
+#ifndef L1D_type
+#define L1D_type  4
+#define L2C_type  5
+#define LLC_type  6
+#endif
+
+// KEY INSIGHT: MSHR tracks MISSES only. CAMAT = active_mem_cy / ALL_accesses (hits+misses).
+// So free_next * camat_next mixes miss-slot count with hit-diluted cost — underestimates true miss cost.
+// camat_per_miss = camat * (h+m) / m  =>  pure miss penalty denominated over misses only.
+//
+// VARIANT A (original — ref): available = free_next * camat_next            [hit-diluted, kept as baseline]
+// VARIANT B (colleague fix):  available = free_next * camat_per_miss_current [next slots * current miss cost]
+// VARIANT C (pure miss cost):  available = free_next * camat_per_miss_next   [next slots * next miss cost]
+// VARIANT D (upper saturation gate + C): bypass only if upper (L1D for L2, L2C for LLC) also saturated
+
+static bool l1_bypass_init = false;
+
+inline bool l1d_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
+    if (l1_bypass_init == false) {
+        cout << "L1D Bypass [_3_derived VARIANT B: free_next * camat_per_miss_current]:\n"
+             << "  camat_per_miss_cur = camat_L1D * (h1+m1)/max(m1,1)\n"
+             << "  available = free_L2C * camat_per_miss_cur\n"
+             << "  immediate = (L2C.RQ+PQ).occ * camat_L2C\n"
+             << "  future    = (lpmr_l2c/lpmr_l1d) * camat_L2C\n"
+             << "  entry     = camat_L2C\n";
+        l1_bypass_init = true;
+    }
+
+
+    uint32_t free = L2C->MSHR.SIZE - L2C->MSHR.occupancy;
+    if (free == 0) return false;
+
+    double camat_cur  = lpm[cpu][L1D_type].camat_activeMemCyDivAccesses_ratio;
+    double camat_next = lpm[cpu][L2C_type].camat_activeMemCyDivAccesses_ratio;
+
+    double h1 = lpm[cpu][L1D_type].h_pureHit_cy;
+    double m1 = lpm[cpu][L1D_type].m_pureMiss_cy;
+    if (m1 < 1.0) m1 = 1.0;
+    // camat is over all accesses; scale back to per-miss cost
+    double camat_per_miss_cur = camat_cur * (h1 + m1) / m1;
+
+    double lpmr_l1d = lpm[cpu][L1D_type].lpmr_activeMemCyDivIdealCy_ratio;
+    double lpmr_l2c = lpm[cpu][L2C_type].lpmr_activeMemCyDivIdealCy_ratio;
+    if (lpmr_l1d < 0.001) lpmr_l1d = 0.001;
+    if (lpmr_l2c < 0.001) lpmr_l2c = 0.001;
+
+    // VARIANT A (original — disabled, kept for reference):
+    // double available = (double)free * camat_next;
+
+    // VARIANT B (active): next slots valued at current per-miss cost
+    double available = (double)free * camat_per_miss_cur;
+
+    double immediate = (double)(L2C->RQ.occupancy + L2C->PQ.occupancy) * camat_next;
+    double future    = (lpmr_l2c / lpmr_l1d) * camat_next;
+    double entry     = camat_next;
+
+    return available > (immediate + future + entry);
+}

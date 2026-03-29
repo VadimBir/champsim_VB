@@ -33,8 +33,8 @@ inline bool l1d_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
     double camat_cur  = lpm[cpu][L1D_type].camat_activeMemCyDivAccesses_ratio;
     double camat_next = lpm[cpu][L2C_type].camat_activeMemCyDivAccesses_ratio;
 
-    double h1 = lpm[cpu][L1D_type].h; double m1 = lpm[cpu][L1D_type].m;
-    double h2 = lpm[cpu][L2C_type].h; double m2 = lpm[cpu][L2C_type].m;
+    double h1 = lpm[cpu][L1D_type].h_pureHit_cy; double m1 = lpm[cpu][L1D_type].m_pureMiss_cy;
+    double h2 = lpm[cpu][L2C_type].h_pureHit_cy; double m2 = lpm[cpu][L2C_type].m_pureMiss_cy;
     if (m1 < 1.0) m1 = 1.0;
     if (m2 < 1.0) m2 = 1.0;
 

@@ -51,8 +51,8 @@ inline bool l1d_bypass_operate(int cpu, CACHE *L1D, CACHE *L2C, CACHE *LLC) {
     double camat_cur  = lpm[cpu][L1D_type].camat_activeMemCyDivAccesses_ratio;
     double camat_next = lpm[cpu][L2C_type].camat_activeMemCyDivAccesses_ratio;
 
-    double h1 = lpm[cpu][L1D_type].h;
-    double m1 = lpm[cpu][L1D_type].m;
+    double h1 = lpm[cpu][L1D_type].h_pureHit_cy;
+    double m1 = lpm[cpu][L1D_type].m_pureMiss_cy;
     if (m1 < 1.0) m1 = 1.0;
     // camat is over all accesses; scale back to per-miss cost
     double camat_per_miss_cur = camat_cur * (h1 + m1) / m1;
